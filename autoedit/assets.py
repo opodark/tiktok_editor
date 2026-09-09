@@ -221,24 +221,30 @@ def _t_badge(p: dict, w: int, h: int) -> Image.Image:
 
 
 def _t_price_tag(p: dict, w: int, h: int) -> Image.Image:
-    """Cartellino prezzo: valore grosso + eventuale prezzo barrato."""
+    """Cartellino prezzo: valore grosso + eventuale prezzo barrato sopra."""
     img, d = _canvas(w, h)
     price = str(p.get("price", "19,99€"))
     old = p.get("old_price")
     bg = _hex(p.get("bg", "#ffe600"))
     fg = _hex(p.get("color", "#111111"))
-    f = _fit_font(_DISPLAY, price, int(w * 0.8), int(h * 0.4))
+    f = _fit_font(_DISPLAY, price, int(w * 0.78), int(h * 0.34))
     bw = d.textlength(price, font=f) + int(w * 0.12)
     bh = f.size * 1.5
-    x, y = (w - bw) / 2, (h - bh) / 2
+    fo = text_font(max(12, int(f.size * 0.4)), weight=700) if old else None
+    old_h = int(fo.size * 1.4) if old else 0
+    block_h = old_h + bh
+    top = (h - block_h) / 2
+    if old:
+        ow = d.textlength(str(old), font=fo)
+        oy = top + fo.size * 0.2
+        d.text((w / 2, oy), str(old), font=fo, fill=_hex("#ffffff"), anchor="ma")
+        ly = oy + fo.size * 0.6
+        d.line((w / 2 - ow / 2 - 6, ly, w / 2 + ow / 2 + 6, ly),
+               fill=_hex("#ff0050"), width=max(3, int(fo.size * 0.14)))
+    y = top + old_h
+    x = (w - bw) / 2
     _rounded(d, (x, y, x + bw, y + bh), radius=int(bh * 0.18), fill=bg)
     _text_with_shadow(d, (w / 2, y + bh / 2), price, f, fg, offset=2, anchor="mm")
-    if old:
-        fo = text_font(int(f.size * 0.42), weight=600)
-        ow = d.textlength(str(old), font=fo)
-        oy = y - fo.size * 1.2
-        d.text((w / 2, oy), str(old), font=fo, fill=_hex("#ffffff"), anchor="mm")
-        d.line((w / 2 - ow / 2, oy, w / 2 + ow / 2, oy), fill=_hex("#ff0050"), width=max(2, int(fo.size * 0.12)))
     return img
 
 
@@ -248,16 +254,19 @@ def _t_cta(p: dict, w: int, h: int) -> Image.Image:
     text = (p.get("text") or "SEGUIMI").upper()
     bg = _hex(p.get("bg", "#ff0050"))
     fg = _hex(p.get("color", "#ffffff"))
-    f = _fit_font(_DISPLAY, text, int(w * 0.7), int(h * 0.3))
-    arrow = int(f.size * 0.9)
-    tw = d.textlength(text, font=f) + arrow * 1.8
+    f = _fit_font(_DISPLAY, text, int(w * 0.62), int(h * 0.3))
+    arrow = int(f.size * 0.7)
+    padx = int(f.size * 0.7)
+    gap = int(f.size * 0.45)
+    tw_text = d.textlength(text, font=f)
+    bw = padx + tw_text + gap + arrow + padx
     bh = f.size * 1.7
-    x, y = (w - tw) / 2, (h - bh) / 2
-    _rounded(d, (x, y, x + tw, y + bh), radius=int(bh / 2), fill=bg)
-    _text_with_shadow(d, (x + int(f.size * 0.7), y + bh / 2), text, f, fg, offset=3, anchor="lm")
-    ax = x + tw - arrow * 1.4
+    x, y = (w - bw) / 2, (h - bh) / 2
+    _rounded(d, (x, y, x + bw, y + bh), radius=int(bh / 2), fill=bg)
+    _text_with_shadow(d, (x + padx, y + bh / 2), text, f, fg, offset=3, anchor="lm")
+    ax = x + padx + tw_text + gap
     ay = y + bh / 2
-    d.polygon([(ax, ay - arrow / 2), (ax, ay + arrow / 2), (ax + arrow * 0.7, ay)], fill=fg)
+    d.polygon([(ax, ay - arrow / 2), (ax, ay + arrow / 2), (ax + arrow, ay)], fill=fg)
     return img
 
 
