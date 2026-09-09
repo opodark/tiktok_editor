@@ -166,10 +166,17 @@ def build_segments(
 
         color_style = pick_color_style(rng, base_style, eff_variety)
 
+        # inquadratura leggermente diversa a ogni taglio: rende meno "uguali"
+        # le clip, soprattutto con foto in raffica (fotogrammi quasi identici).
+        jv = eff_variety
+        jitter = (round(rng.uniform(0.0, 0.16) * jv, 3),
+                  round(rng.uniform(-0.12, 0.12) * jv, 3),
+                  round(rng.uniform(-0.12, 0.12) * jv, 3))
+
         segments.append(Segment(
             item=item, duration=dur, transition=transition, accented=accented, strong=strong,
             color_style=color_style, motion=motion, impact_key=impact_key,
-            video_speed=vspeed, hero=hero,
+            video_speed=vspeed, hero=hero, crop_jitter=jitter,
         ))
         k += 2 if hero else 1
 

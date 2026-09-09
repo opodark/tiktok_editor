@@ -57,6 +57,7 @@ class Segment:
     impact_key: str = ""                  # effetto d'impatto sui primi frame (solo tagli accentati)
     video_speed: float = 1.0              # <1 = slow motion, >1 = accelerato (solo clip video)
     hero: bool = False                    # segmento "tenuto" piu' a lungo (2 beat)
+    crop_jitter: tuple = (0.0, 0.0, 0.0)  # (dzoom, dx, dy) per-clip: inquadra ogni taglio un po' diverso
     clip_path: Optional[Path] = None
     render_duration: Optional[float] = None  # durata realmente renderizzata (duration + coda per la transizione)
 
@@ -184,7 +185,10 @@ def _render_one(i: int, seg: Segment, target_w: int, target_h: int, fps: int, st
     eff_style = seg.color_style or style
     eff_motion = seg.motion or motion
     impact = IMPACT_EFFECTS.get(seg.impact_key, "")
-    cz, cax, cay = crop
+    jz, jx, jy = getattr(seg, "crop_jitter", (0.0, 0.0, 0.0))
+    cz = max(1.0, crop[0] + jz)
+    cax = min(1.0, max(0.0, crop[1] + jx))
+    cay = min(1.0, max(0.0, crop[2] + jy))
     if seg.item.kind == "image":
         rdur = build_image_segment(seg.item, seg.duration, target_w, target_h, fps, eff_style,
                                     local_rng, punch_in=seg.accented, out_path=out_path, pad=pad,
