@@ -28,8 +28,9 @@ TITLE_POSITIONS = ["top", "center", "bottom"]
 @dataclass
 class LLMConfig:
     provider: str = "openai"      # "openai" (compatibile) | "anthropic"
-    base_url: str = ""            # vuoto = endpoint di default del provider
-    model: str = ""              # es. "llama3.1", "qwen2.5:7b", "claude-opus-5"
+    # default: Ollama in locale. Vuoto = endpoint di default del provider.
+    base_url: str = "http://localhost:11434/v1"
+    model: str = ""              # es. "qwen2.5:7b", "hf.co/utente/repo:Q4_K_M", "claude-sonnet-5"
     api_key: str = ""
     timeout: float = 180.0        # i modelli locali possono essere lenti
 

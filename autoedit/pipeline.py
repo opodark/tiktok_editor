@@ -54,6 +54,11 @@ class RenderConfig:
     transition_mode: str = "auto"     # auto | cut | fade | slide | zoom | chaos
     shuffle: bool = False
 
+    # --- inquadratura / ritaglio (globale, uguale su tutte le clip) -------
+    crop_zoom: float = 1.0            # >= 1 = stringe l'inquadratura
+    crop_x: float = 0.5              # 0..1  (0 = sinistra, 0.5 = centro, 1 = destra)
+    crop_y: float = 0.5              # 0..1  (0 = alto,     0.5 = centro, 1 = basso)
+
     # --- stile di montaggio (ricetta) ---------------------------------
     # "custom" = usa i singoli parametri qui sotto; altrimenti una voce di
     # effects.EDIT_STYLES pilota movimento/transizioni/effetti/rifiniture.
@@ -222,7 +227,10 @@ def run_pipeline(cfg: RenderConfig, progress: Optional[ProgressCB] = None) -> Pa
         _p(0.30, f"Rendering dei segmenti in {work_dir} ...")
         render_segments(segments, target_w, target_h, cfg.fps, cfg.style, rng, work_dir,
                         jobs=cfg.jobs, xfade_duration=xfd, chunk_size=cfg.chunk_size,
-                        motion=cfg.motion, motion_intensity=motion_intensity, finish=finish)
+                        motion=cfg.motion, motion_intensity=motion_intensity, finish=finish,
+                        crop=(max(1.0, float(cfg.crop_zoom)),
+                              min(1.0, max(0.0, float(cfg.crop_x))),
+                              min(1.0, max(0.0, float(cfg.crop_y)))))
 
         silent_path = work_dir / "silent.mp4"
         _p(0.80, "Assemblo i segmenti con le transizioni ...")

@@ -5,11 +5,13 @@ Avvio:
     pip install -r requirements-gui.txt
     python gui.py
 
-Flusso in due passi:
-  1. ANALIZZA  -> carichi foto/video + canzone, vedi miniature, forma
-     d'onda con i beat e i dati del brano.
-  2. GENERA    -> scegli effetti / ritmo / formato, eventualmente riordini
-     o escludi media nella tabella, e monti il video.
+Flusso:
+  1. MEDIA & MUSICA  -> carichi foto/video + canzone, vedi miniature, forma
+     d'onda con i beat, e decidi l'inquadratura (ritaglio) con l'anteprima.
+  2. MONTAGGIO       -> stile, ritmo, effetti; eventualmente un brief all'LLM.
+  3. GRAFICA & TESTO -> titolo e logo.
+  4. GENERA          -> monti il video (o una variante) e lo scarichi.
+  ⚙️ IMPOSTAZIONI    -> connessione LLM, ffmpeg, file temporanei.
 """
 from __future__ import annotations
 
@@ -92,7 +94,7 @@ PRESET_FIELDS = [
     "variety", "impact", "grain", "vignette", "chromatic", "slowmo", "hold_prob", "title_text",
     "title_pos", "title_start", "title_dur", "wm_pos", "wm_scale", "wm_opacity", "hook_hold",
     "audio_start", "beat_offset", "xfade_ms", "snap_onsets", "dynamic_pacing", "strong_only",
-    "shuffle", "max_dur", "seed",
+    "shuffle", "max_dur", "seed", "crop_zoom", "crop_x", "crop_y",
 ]
 
 
@@ -110,14 +112,14 @@ def _make_thumb(path: Path, kind: str, out: Path) -> None:
     if kind == "video":
         subprocess.run(
             ["ffmpeg", "-y", "-ss", "0", "-i", str(path), "-frames:v", "1",
-             "-vf", "scale=240:-2", str(out), "-loglevel", "error"],
+             "-vf", "scale=480:-2", str(out), "-loglevel", "error"],
             check=False,
         )
     if not out.exists():
         try:
             im = Image.open(path)
-            im.thumbnail((240, 426))
-            im.convert("RGB").save(out, "JPEG", quality=85)
+            im.thumbnail((640, 1138))
+            im.convert("RGB").save(out, "JPEG", quality=88)
         except Exception:  # noqa: BLE001
             pass
 
@@ -156,6 +158,65 @@ def _rows_from_table(table) -> list[list]:
     if hasattr(table, "values"):
         return table.values.tolist()
     return [list(r) for r in table]
+
+
+# --- anteprima ritaglio (stessa matematica di effects.crop_to_fill, in PIL) --
+def _crop_preview(src: Path, aspect: str, zoom: float, cx: float, cy: float,
+                   box_h: int = 760) -> tuple[Image.Image, Image.Image]:
+    """Ritorna (frame_risultante, originale_con_riquadro).
+
+    `aspect` e' una chiave di ASPECTS ("9:16"...). `zoom` >= 1 stringe,
+    `cx`/`cy` in [0,1] spostano l'inquadratura (0.5 = centro).
+    """
+    tw, th = ASPECTS[aspect]
+    ar = tw / th
+    box_w = int(round(box_h * ar))
+    z = max(1.0, float(zoom))
+    cx = min(1.0, max(0.0, float(cx)))
+    cy = min(1.0, max(0.0, float(cy)))
+
+    im = Image.open(src).convert("RGB")
+    W, H = im.size
+    # scala per RIEMPIRE box_w x box_h (lato corto copre), poi zoom extra
+    s = max(box_w / W, box_h / H) * z
+    sw, sh = max(box_w, int(round(W * s))), max(box_h, int(round(H * s)))
+    scaled = im.resize((sw, sh), Image.LANCZOS)
+
+    x0 = int(round((sw - box_w) * cx))
+    y0 = int(round((sh - box_h) * cy))
+    result = scaled.crop((x0, y0, x0 + box_w, y0 + box_h))
+
+    # originale (ridotto) con il rettangolo di taglio sovrapposto
+    prev_w = 460
+    prev_h = max(1, int(round(H * prev_w / W)))
+    orig = im.resize((prev_w, prev_h), Image.LANCZOS).convert("RGBA")
+    k = prev_w / sw
+    rx0, ry0 = x0 * k, y0 * k
+    rx1, ry1 = (x0 + box_w) * k, (y0 + box_h) * k
+    shade = Image.new("RGBA", orig.size, (0, 0, 0, 0))
+    ds = ImageDraw.Draw(shade)
+    ds.rectangle((0, 0, prev_w, prev_h), fill=(0, 0, 0, 110))
+    ds.rectangle((rx0, ry0, rx1, ry1), fill=(0, 0, 0, 0))
+    ds.rectangle((rx0, ry0, rx1, ry1), outline=(255, 0, 80, 255), width=3)
+    orig = Image.alpha_composite(orig, shade)
+    return result, orig.convert("RGB")
+
+
+def _preview_from_state(state, which, aspect_label, zoom, cx, cy):
+    if not state or not state.get("metas"):
+        return None, None
+    metas = state["metas"]
+    idx = 0
+    if which:
+        m = re.match(r"\s*(\d+)", str(which))
+        if m:
+            idx = min(len(metas) - 1, max(0, int(m.group(1))))
+    src = Path(metas[idx]["thumb"])
+    aspect = ASPECT_LABELS.get(aspect_label, "9:16")
+    try:
+        return _crop_preview(src, aspect, zoom, cx, cy)
+    except Exception:  # noqa: BLE001
+        return None, None
 
 
 # --- logica pura (nessun oggetto Gradio) ---------------------------------
@@ -201,12 +262,20 @@ def _do_analyze(files, audio):
              "audio": str(audio_path), "metas": metas,
              "beat": {"bpm": round(float(bi.tempo)), "duration": round(float(bi.duration), 1),
                       "downbeats": int(len(bi.downbeat_times))}}
-    return state, gallery, table, str(wave), info
+    which_choices = [f'{i} · {m["orig"]}' for i, m in enumerate(metas)]
+    prev_res, prev_orig = (None, None)
+    try:
+        prev_res, prev_orig = _crop_preview(Path(metas[0]["thumb"]), "9:16", 1.0, 0.5, 0.5)
+    except Exception:  # noqa: BLE001
+        pass
+    return (state, gallery, table, str(wave), info,
+            gr.update(choices=which_choices, value=which_choices[0] if which_choices else None),
+            prev_res, prev_orig)
 
 
 def _do_generate(state, p: dict, force_seed, progress) -> tuple[str, str]:
     if not state:
-        raise gr.Error("Premi prima «Analizza».")
+        raise gr.Error("Premi prima «Analizza» nella tab Media & Musica.")
     media_dir = Path(state["media_dir"])
     audio_path = Path(state["audio"])
     metas = state["metas"]
@@ -232,6 +301,10 @@ def _do_generate(state, p: dict, force_seed, progress) -> tuple[str, str]:
     cfg = RenderConfig(
         media_dir=media_dir, audio=audio_path, out=out_path, order_file=order_file,
         aspect=ASPECT_LABELS[p["aspect"]],
+        fps=int(p.get("fps") or 30),
+        crop_zoom=float(p.get("crop_zoom") or 1.0),
+        crop_x=float(p.get("crop_x") if p.get("crop_x") is not None else 0.5),
+        crop_y=float(p.get("crop_y") if p.get("crop_y") is not None else 0.5),
         style=STYLE_BY_LABEL.get(p["style"], "vivid"),
         cuts_per_beat=SPEEDS[p["speed"]],
         beat_offset=float(p.get("beat_offset") or 0.0),
@@ -262,6 +335,9 @@ def _do_generate(state, p: dict, force_seed, progress) -> tuple[str, str]:
         watermark_opacity=float(p.get("wm_opacity") or 0.85),
         shuffle=bool(p.get("shuffle")),
         max_duration=float(p["max_dur"]) if p.get("max_dur") else None,
+        jobs=int(p.get("jobs") or 0),
+        chunk_size=int(p.get("chunk_size") or 10),
+        keep_temp=bool(p.get("keep_temp")),
         seed=force_seed if force_seed is not None
         else (int(seed_val) if seed_val not in (None, "") else None),
     )
@@ -274,126 +350,233 @@ def _do_generate(state, p: dict, force_seed, progress) -> tuple[str, str]:
     return str(out_path), str(out_path)
 
 
+CSS = """
+.hint { font-size: 12px; opacity: .7; margin: -6px 0 8px; }
+"""
+
 with gr.Blocks(title="autoedit — montaggio automatico") as demo:
     state = gr.State()
-    gr.Markdown(
-        "# 🎬 autoedit\n"
-        "**1.** Carica foto/video + una canzone e premi **Analizza**. "
-        "**2.** Regola effetti e opzioni, poi **Genera**.\n\n"
-        "*Tutto in locale: serve `ffmpeg` installato.*"
-    )
+    gr.Markdown("# 🎬 autoedit\n*Montaggio verticale sincronizzato sul beat. Tutto in locale.*")
 
-    with gr.Row():
-        files = gr.File(label="Foto e video", file_count="multiple", file_types=ALLOWED_EXT)
-        audio = gr.Audio(label="Canzone (mp3 / wav)", type="filepath")
-    analizza_btn = gr.Button("🔍 Analizza", variant="secondary")
+    with gr.Tabs():
+        # =================================================================
+        # 1 · MEDIA & MUSICA
+        # =================================================================
+        with gr.Tab("1 · Media & Musica"):
+            with gr.Row():
+                files = gr.File(label="Foto e video", file_count="multiple", file_types=ALLOWED_EXT)
+                audio = gr.Audio(label="Canzone (mp3 / wav)", type="filepath")
+            gr.Markdown(
+                "<div class='hint'>La canzone serve solo a trovare il beat: puoi montare "
+                "su un mp3 e poi rimettere la traccia dalla libreria di TikTok (stessa canzone).</div>")
+            analizza_btn = gr.Button("🔍 Analizza", variant="primary")
 
-    info_md = gr.Markdown()
-    wave_img = gr.Image(label="Forma d'onda + beat / downbeat / beat forti", interactive=False)
-    gallery = gr.Gallery(label="Media caricati", columns=6, height="auto")
-    table = gr.Dataframe(
-        headers=TABLE_HEADERS, datatype=["number", "str", "bool", "number"],
-        column_count=(4, "fixed"), interactive=True,
-        label="Ordine e selezione — cambia «ordine» per riordinare, togli «includi» per escludere",
-    )
+            info_md = gr.Markdown()
+            wave_img = gr.Image(label="Forma d'onda + beat / downbeat (giallo) / beat forti (rosso)",
+                                interactive=False)
+            gallery = gr.Gallery(label="Media caricati", columns=6, height="auto")
+            table = gr.Dataframe(
+                headers=TABLE_HEADERS, datatype=["number", "str", "bool", "number"],
+                column_count=(4, "fixed"), interactive=True,
+                label="Ordine e selezione",
+            )
+            gr.Markdown("<div class='hint'>Cambia la colonna «ordine» per riordinare · "
+                        "togli la spunta «includi» per escludere una clip.</div>")
 
-    gr.Markdown("### Montaggio")
-    edit_style = gr.Dropdown(
-        list(EDIT_STYLE_BY_LABEL), value=EDIT_STYLE_LABELS["clean"],
-        label="Stile di montaggio — ricette coerenti stile TikTok/CapCut (il pannello Effetti serve solo con «Personalizzato»)")
-    with gr.Row():
-        speed = gr.Dropdown(list(SPEEDS), value=list(SPEEDS)[1], label="Velocità dei tagli")
-        aspect = gr.Dropdown(list(ASPECT_LABELS), value=list(ASPECT_LABELS)[0], label="Formato video")
-        transition_mode = gr.Dropdown(list(TRANSITIONS), value=list(TRANSITIONS)[0],
-                                      label="Transizioni (solo «Personalizzato»)")
+            with gr.Accordion("🖼️ Inquadratura / ritaglio", open=True):
+                gr.Markdown(
+                    "<div class='hint'>Come vengono ritagliate le clip per riempire il formato. "
+                    "Vale per tutte le clip. A sinistra il risultato, a destra dov'e' il taglio "
+                    "sull'originale.</div>")
+                with gr.Row():
+                    crop_preview_out = gr.Image(label="Come apparira'", interactive=False, height=380)
+                    crop_orig_out = gr.Image(label="Taglio sull'originale", interactive=False, height=380)
+                crop_which = gr.Dropdown(
+                    [], label="Anteprima su quale media",
+                    info="Scegli una clip caricata; l'inquadratura poi vale per tutte.")
+                with gr.Row():
+                    crop_zoom = gr.Slider(1.0, 2.5, value=1.0, step=0.05, label="Zoom",
+                                          info="1.0 = riempi e basta. Più alto = inquadratura più stretta.")
+                    crop_x = gr.Slider(0.0, 1.0, value=0.5, step=0.02, label="Orizzontale",
+                                       info="0 = verso sinistra · 0.5 = centro · 1 = verso destra.")
+                    crop_y = gr.Slider(0.0, 1.0, value=0.5, step=0.02, label="Verticale",
+                                       info="0 = verso l'alto · 0.5 = centro · 1 = verso il basso. "
+                                            "Foto da telefono: spesso 0.35–0.45 tiene i volti in campo.")
 
-    with gr.Accordion("💾 Preset", open=False):
-        with gr.Row():
-            preset_dd = gr.Dropdown(_list_presets(), label="Preset salvati", scale=3)
-            carica_btn = gr.Button("Carica", scale=1)
-            elimina_btn = gr.Button("Elimina", variant="stop", scale=1)
-        with gr.Row():
-            preset_name = gr.Textbox(label="Nome per salvare le impostazioni attuali", scale=3)
-            salva_btn = gr.Button("Salva", variant="secondary", scale=1)
+        # =================================================================
+        # 2 · MONTAGGIO
+        # =================================================================
+        with gr.Tab("2 · Montaggio"):
+            edit_style = gr.Dropdown(
+                list(EDIT_STYLE_BY_LABEL), value=EDIT_STYLE_LABELS["clean"],
+                label="Stile di montaggio",
+                info="Ricette coerenti stile TikTok/CapCut. I pannelli Effetti/Transizioni "
+                     "contano solo con «Personalizzato».")
+            with gr.Row():
+                speed = gr.Dropdown(list(SPEEDS), value=list(SPEEDS)[1], label="Velocità dei tagli",
+                                    info="Quanti stacchi per battito musicale.")
+                aspect = gr.Dropdown(list(ASPECT_LABELS), value=list(ASPECT_LABELS)[0],
+                                     label="Formato video",
+                                     info="9:16 per TikTok/Reels/Shorts. Cambia anche l'anteprima ritaglio.")
+                transition_mode = gr.Dropdown(list(TRANSITIONS), value=list(TRANSITIONS)[0],
+                                              label="Transizioni",
+                                              info="Solo con stile «Personalizzato».")
 
-    with gr.Accordion("🤖 Brief AI — descrivi il video e lascia scegliere all'LLM", open=False):
-        _llm0 = load_llm_config()
-        with gr.Row():
-            llm_provider = gr.Radio(list(LLM_PROVIDERS),
-                                    value=PROVIDER_LABEL.get(_llm0.provider, list(LLM_PROVIDERS)[0]),
-                                    label="Provider")
-            llm_model = gr.Textbox(value=_llm0.model, label="Modello",
-                                   placeholder="es. llama3.1  ·  qwen2.5:7b  ·  claude-opus-5")
-        with gr.Row():
-            llm_base_url = gr.Textbox(value=_llm0.base_url, label="Base URL (vuoto = default del provider)",
-                                      placeholder="Ollama: http://localhost:11434/v1  ·  LM Studio: http://localhost:1234/v1")
-            llm_key = gr.Textbox(value=_llm0.api_key, label="API key (le locali spesso non la vogliono)",
-                                 type="password")
-        llm_save_btn = gr.Button("Salva connessione", variant="secondary")
-        brief_text = gr.Textbox(lines=3, label="Brief",
-                                placeholder="es. reel energico da spiaggia, taglio veloce, malinconico sul finale, titolo 'ESTATE 2026'")
-        brief_btn = gr.Button("✨ Compila impostazioni dal brief", variant="primary")
-        llm_status = gr.Markdown()
+            with gr.Accordion("🤖 Brief AI — descrivi il video, sceglie l'LLM", open=False):
+                gr.Markdown("<div class='hint'>La connessione al modello si imposta nella tab "
+                            "⚙️ Impostazioni. Qui scrivi cosa vuoi e premi Compila.</div>")
+                brief_text = gr.Textbox(
+                    lines=3, label="Brief",
+                    placeholder="es. reel energico da spiaggia, taglio veloce, malinconico sul finale, "
+                                "titolo 'ESTATE 2026'")
+                brief_btn = gr.Button("✨ Compila impostazioni dal brief", variant="primary")
+                llm_status = gr.Markdown()
 
-    with gr.Accordion("🎨 Effetti (solo con stile «Personalizzato»)", open=False):
-        with gr.Row():
-            style = gr.Dropdown(list(STYLE_BY_LABEL), value=COLOR_LABELS["vivid"],
-                                label="Colore / grade di base")
-            motion = gr.Dropdown(list(MOTION_BY_LABEL), value=MOTION_LABELS["kenburns"],
-                                 label="Movimento")
-            motion_intensity = gr.Slider(0.2, 2.5, value=1.0, step=0.1, label="Intensità movimento")
-        variety = gr.Slider(0.0, 1.0, value=0.3, step=0.05,
-                            label="Varietà — quanto grade/movimento cambiano da clip a clip (anti-monotonia)")
-        impact_group = gr.CheckboxGroup(
-            list(IMPACT_BY_LABEL), value=[IMPACT_LABELS["flash"], IMPACT_LABELS["rgbsplit"]],
-            label="Effetti d'impatto sui beat forti (scelti a caso fra questi)")
-        with gr.Row():
-            grain = gr.Slider(0.0, 1.0, value=0.0, step=0.05, label="Grana")
-            vignette = gr.Checkbox(value=False, label="Vignettatura")
-            chromatic = gr.Checkbox(value=False, label="Aberrazione cromatica")
-        with gr.Row():
-            slowmo = gr.Checkbox(value=False,
-                                 label="Slow-motion + accelerazioni sulle clip video")
-            hold_prob = gr.Slider(0.0, 0.4, value=0.0, step=0.02,
-                                  label="Clip «hero» tenute 2 beat (0 = mai)")
+            with gr.Accordion("🎨 Effetti (solo con stile «Personalizzato»)", open=False):
+                with gr.Row():
+                    style = gr.Dropdown(list(STYLE_BY_LABEL), value=COLOR_LABELS["vivid"],
+                                        label="Colore / grade di base",
+                                        info="Correzione colore applicata a tutte le clip.")
+                    motion = gr.Dropdown(list(MOTION_BY_LABEL), value=MOTION_LABELS["kenburns"],
+                                         label="Movimento",
+                                         info="Come si muove l'inquadratura dentro ogni clip.")
+                    motion_intensity = gr.Slider(0.2, 2.5, value=1.0, step=0.1,
+                                                 label="Intensità movimento",
+                                                 info="Ampiezza di zoom e oscillazioni.")
+                variety = gr.Slider(0.0, 1.0, value=0.3, step=0.05, label="Varietà",
+                                    info="Quanto grade e movimento cambiano da clip a clip. "
+                                         "Alto = anti-monotonia, basso = uniforme.")
+                impact_group = gr.CheckboxGroup(
+                    list(IMPACT_BY_LABEL), value=[IMPACT_LABELS["flash"], IMPACT_LABELS["rgbsplit"]],
+                    label="Effetti d'impatto sui beat forti",
+                    info="Ne viene scelto uno a caso fra quelli spuntati, sui colpi forti.")
+                with gr.Row():
+                    grain = gr.Slider(0.0, 1.0, value=0.0, step=0.05, label="Grana",
+                                      info="Rumore tipo pellicola.")
+                    vignette = gr.Checkbox(value=False, label="Vignettatura",
+                                           info="Bordi leggermente più scuri.")
+                    chromatic = gr.Checkbox(value=False, label="Aberrazione cromatica",
+                                            info="Sfrangiatura RGB leggera su tutto.")
+                with gr.Row():
+                    slowmo = gr.Checkbox(value=False, label="Slow-motion + accelerazioni (clip video)",
+                                         info="Rallenta/velocizza gli spezzoni video a ritmo.")
+                    hold_prob = gr.Slider(0.0, 0.4, value=0.0, step=0.02,
+                                          label="Clip «hero» tenute 2 beat",
+                                          info="Probabilità che una clip resti in campo il doppio. 0 = mai.")
 
-    with gr.Accordion("✍️ Testo / titolo", open=False):
-        title_text = gr.Textbox(label="Testo del titolo (vuoto = niente)", lines=2)
-        with gr.Row():
-            title_pos = gr.Dropdown(list(TITLE_POS), value="Al centro", label="Posizione")
-            title_start = gr.Number(value=0.0, label="Compare al secondo")
-            title_dur = gr.Number(value=2.5, label="Resta per (s)")
+            with gr.Accordion("⏱️ Ritmo / sincronia / hook", open=False):
+                with gr.Row():
+                    hook_hold = gr.Slider(0.0, 2.0, value=0.0, step=0.1,
+                                          label="Hook — primo clip fermo (s)",
+                                          info="Tiene fermo il primo clip N secondi prima che parta il "
+                                               "montaggio. Il primo taglio resta sul beat.")
+                    audio_start = gr.Number(value=0.0, label="Inizio canzone (s)",
+                                            info="Salta l'intro del brano.")
+                beat_offset = gr.Slider(-0.20, 0.20, value=0.0, step=0.01, label="Sincronia fine (s)",
+                                        info="Se i tagli «sentono» in ritardo alza, se in anticipo abbassa.")
+                xfade_ms = gr.Slider(0, 500, value=180, step=10, label="Durata transizioni (ms)",
+                                     info="Sotto ~70 = stacchi netti sul beat.")
+                snap_onsets = gr.Checkbox(value=True, label="Aggancia i tagli ai transienti reali",
+                                          info="Consigliato: i sotto-tagli cadono su attacchi veri del brano.")
+                dynamic_pacing = gr.Checkbox(value=False, label="Ritmo dinamico",
+                                             info="Più tagli nei tratti intensi, meno nei tratti calmi.")
+                strong_only = gr.Checkbox(value=False, label="Taglia solo sui beat forti",
+                                          info="Montaggio più calmo.")
+                shuffle = gr.Checkbox(value=False, label="Ordine casuale dei media",
+                                      info="Ignora la colonna «ordine» della tabella.")
+                with gr.Row():
+                    max_dur = gr.Number(label="Durata massima (s)", value=None,
+                                        info="Vuoto = tutta la canzone.")
+                    seed = gr.Number(label="Seed", value=None, precision=0,
+                                     info="Stesso numero = stesso montaggio. Vuoto = casuale.")
 
-    with gr.Accordion("🖼️ Logo / watermark", open=False):
-        wm_file = gr.Image(label="PNG con trasparenza (vuoto = niente)", type="filepath")
-        with gr.Row():
-            wm_pos = gr.Dropdown(list(WM_POS), value=list(WM_POS)[0], label="Angolo")
-            wm_scale = gr.Slider(0.05, 0.40, value=0.15, step=0.01, label="Dimensione")
-            wm_opacity = gr.Slider(0.2, 1.0, value=0.85, step=0.05, label="Opacità")
+        # =================================================================
+        # 3 · GRAFICA & TESTO
+        # =================================================================
+        with gr.Tab("3 · Grafica & Testo"):
+            with gr.Accordion("✍️ Titolo in sovrimpressione", open=True):
+                title_text = gr.Textbox(label="Testo del titolo", lines=2,
+                                        info="Vuoto = nessun titolo. A capo automatico.")
+                with gr.Row():
+                    title_pos = gr.Dropdown(list(TITLE_POS), value="Al centro", label="Posizione")
+                    title_start = gr.Number(value=0.0, label="Compare al secondo")
+                    title_dur = gr.Number(value=2.5, label="Resta per (s)")
 
-    with gr.Accordion("⏱️ Ritmo / sincronia / hook", open=False):
-        with gr.Row():
-            hook_hold = gr.Slider(0.0, 2.0, value=0.0, step=0.1,
-                                  label="Hook — tieni fermo il primo clip (s)")
-            audio_start = gr.Number(value=0.0, label="Inizio canzone (s) — salta l'intro")
-        beat_offset = gr.Slider(-0.20, 0.20, value=0.0, step=0.01,
-                                label="Sincronia fine (s) — tagli in ritardo: alza · in anticipo: abbassa")
-        xfade_ms = gr.Slider(0, 500, value=180, step=10,
-                             label="Durata transizioni (ms) — sotto ~70 = stacchi netti sul beat")
-        snap_onsets = gr.Checkbox(value=True, label="Aggancia i tagli ai transienti reali (consigliato)")
-        dynamic_pacing = gr.Checkbox(value=False, label="Ritmo dinamico — più tagli nei momenti intensi")
-        strong_only = gr.Checkbox(value=False, label="Taglia solo sui beat forti")
-        shuffle = gr.Checkbox(value=False, label="Ordine casuale dei media (ignora la tabella)")
-        max_dur = gr.Number(label="Durata massima del montaggio (s, vuoto = tutta la canzone)", value=None)
-        seed = gr.Number(label="Seed (stesso numero = stesso risultato)", value=None, precision=0)
+            with gr.Accordion("🖼️ Logo / watermark", open=False):
+                wm_file = gr.Image(label="PNG con trasparenza (vuoto = nessun logo)",
+                                   type="filepath")
+                with gr.Row():
+                    wm_pos = gr.Dropdown(list(WM_POS), value=list(WM_POS)[0], label="Angolo")
+                    wm_scale = gr.Slider(0.05, 0.40, value=0.15, step=0.01, label="Dimensione",
+                                         info="Larghezza come frazione del video.")
+                    wm_opacity = gr.Slider(0.2, 1.0, value=0.85, step=0.05, label="Opacità")
 
-    with gr.Row():
-        genera_btn = gr.Button("🎬 Genera", variant="primary", size="lg")
-        variante_btn = gr.Button("🎲 Variante", variant="secondary")
-    with gr.Row():
-        out_video = gr.Video(label="Anteprima")
-        out_file = gr.File(label="Scarica il video")
+        # =================================================================
+        # 4 · GENERA
+        # =================================================================
+        with gr.Tab("4 · Genera"):
+            with gr.Row():
+                genera_btn = gr.Button("🎬 Genera", variant="primary", size="lg")
+                variante_btn = gr.Button("🎲 Variante", variant="secondary",
+                                         size="lg")
+            gr.Markdown("<div class='hint'>«Variante» rimonta la stessa musica e gli stessi media "
+                        "con un seed diverso.</div>")
+            with gr.Row():
+                out_video = gr.Video(label="Anteprima")
+                out_file = gr.File(label="Scarica il video")
 
+            with gr.Accordion("💾 Preset", open=False):
+                gr.Markdown("<div class='hint'>Salva/riusa tutte le impostazioni di montaggio, "
+                            "grafica e inquadratura (non i media).</div>")
+                with gr.Row():
+                    preset_dd = gr.Dropdown(_list_presets(), label="Preset salvati", scale=3)
+                    carica_btn = gr.Button("Carica", scale=1)
+                    elimina_btn = gr.Button("Elimina", variant="stop", scale=1)
+                with gr.Row():
+                    preset_name = gr.Textbox(label="Nome per salvare le impostazioni attuali", scale=3)
+                    salva_btn = gr.Button("Salva", variant="secondary", scale=1)
+
+        # =================================================================
+        # ⚙️ IMPOSTAZIONI
+        # =================================================================
+        with gr.Tab("⚙️ Impostazioni"):
+            _llm0 = load_llm_config()
+            with gr.Accordion("🤖 Connessione LLM (per il Brief AI)", open=True):
+                with gr.Row():
+                    llm_provider = gr.Radio(
+                        list(LLM_PROVIDERS),
+                        value=PROVIDER_LABEL.get(_llm0.provider, list(LLM_PROVIDERS)[0]),
+                        label="Provider",
+                        info="«Compatibile OpenAI» copre Ollama, LM Studio, llama.cpp, vLLM…")
+                    llm_model = gr.Textbox(
+                        value=_llm0.model, label="Modello",
+                        placeholder="qwen2.5:7b  ·  hf.co/utente/repo:Q4_K_M  ·  claude-sonnet-5",
+                        info="Nome esatto del modello nel provider.")
+                with gr.Row():
+                    llm_base_url = gr.Textbox(
+                        value=_llm0.base_url, label="Base URL",
+                        placeholder="http://localhost:11434/v1",
+                        info="Vuoto = default del provider. Ollama: http://localhost:11434/v1")
+                    llm_key = gr.Textbox(value=_llm0.api_key, label="API key", type="password",
+                                         info="I modelli locali di solito non la richiedono.")
+                llm_save_btn = gr.Button("Salva connessione", variant="secondary")
+                llm_cfg_status = gr.Markdown()
+
+            with gr.Accordion("⚙️ Rendering (ffmpeg)", open=False):
+                with gr.Row():
+                    fps_set = gr.Slider(24, 60, value=30, step=1, label="FPS di output",
+                                        info="30 va bene per TikTok. 60 = più fluido, file più pesante.")
+                    jobs_set = gr.Slider(0, 16, value=0, step=1, label="Processi ffmpeg paralleli",
+                                         info="0 = automatico (in base ai core della CPU).")
+                    chunk_set = gr.Slider(4, 24, value=10, step=1, label="Segmenti per catena",
+                                          info="Più alto = meno file intermedi ma più RAM. Se il "
+                                               "montaggio viene ucciso a metà, abbassa.")
+                keep_temp = gr.Checkbox(value=False, label="Tieni i file temporanei",
+                                        info="Per debug: non cancella la cartella di lavoro.")
+
+    # ---------------------------------------------------------------------
+    # Wiring
+    # ---------------------------------------------------------------------
     def _params(d: dict) -> dict:
         return {
             "table": d[table], "style": d[style], "speed": d[speed], "aspect": d[aspect],
@@ -409,6 +592,9 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
             "xfade_ms": d[xfade_ms], "snap_onsets": d[snap_onsets], "dynamic_pacing": d[dynamic_pacing],
             "strong_only": d[strong_only], "shuffle": d[shuffle], "max_dur": d[max_dur],
             "seed": d[seed],
+            "crop_zoom": d[crop_zoom], "crop_x": d[crop_x], "crop_y": d[crop_y],
+            "fps": d[fps_set], "jobs": d[jobs_set], "chunk_size": d[chunk_set],
+            "keep_temp": d[keep_temp],
         }
 
     def on_generate(d, progress=gr.Progress()):
@@ -423,6 +609,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         impact_group, grain, vignette, chromatic, slowmo, hold_prob, title_text, title_pos,
         title_start, title_dur, wm_pos, wm_scale, wm_opacity, hook_hold, audio_start, beat_offset,
         xfade_ms, snap_onsets, dynamic_pacing, strong_only, shuffle, max_dur, seed,
+        crop_zoom, crop_x, crop_y,
     ]
 
     def load_preset(name):
@@ -450,7 +637,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
             (PRESETS_DIR / f"{name}.json").unlink(missing_ok=True)
         return gr.update(choices=_list_presets(), value=None)
 
-    # ---- Brief AI ----
+    # ---- LLM / Brief ----
     def _llm_cfg(d) -> LLMConfig:
         return LLMConfig(
             provider=LLM_PROVIDERS.get(d[llm_provider], "openai"),
@@ -463,7 +650,6 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         save_llm_config(_llm_cfg(d))
         return "✅ Connessione salvata in `llm_config.json`."
 
-    # componenti aggiornati da un brief, nell'ordine di BRIEF_KEYS
     BRIEF_COMPONENTS = [edit_style, style, motion, motion_intensity, transition_mode, variety,
                         impact_group, grain, vignette, chromatic, slowmo, hold_prob, speed,
                         aspect, strong_only, dynamic_pacing, xfade_ms, hook_hold, title_text,
@@ -517,15 +703,25 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         applied = ", ".join(f"`{k}`" for k in ov)
         return [_brief_update(k, ov) for k in BRIEF_KEYS] + [f"✅ Applicato: {applied}"]
 
+    # ---- anteprima ritaglio ----
+    _crop_inputs = [state, crop_which, aspect, crop_zoom, crop_x, crop_y]
+    _crop_outputs = [crop_preview_out, crop_orig_out]
+    for _c in (crop_which, aspect):
+        _c.change(_preview_from_state, inputs=_crop_inputs, outputs=_crop_outputs)
+    for _c in (crop_zoom, crop_x, crop_y):
+        _c.release(_preview_from_state, inputs=_crop_inputs, outputs=_crop_outputs)
+
     gen_set = {
         state, table, style, speed, aspect, edit_style, transition_mode, motion, motion_intensity,
         variety, impact_group, grain, vignette, chromatic, slowmo, hold_prob, title_text,
         title_pos, title_start, title_dur, wm_file, wm_pos, wm_scale, wm_opacity, hook_hold,
         audio_start, beat_offset, xfade_ms, snap_onsets, dynamic_pacing, strong_only, shuffle,
-        max_dur, seed,
+        max_dur, seed, crop_zoom, crop_x, crop_y, fps_set, jobs_set, chunk_set, keep_temp,
     }
-    analizza_btn.click(_do_analyze, inputs=[files, audio],
-                       outputs=[state, gallery, table, wave_img, info_md])
+    analizza_btn.click(
+        _do_analyze, inputs=[files, audio],
+        outputs=[state, gallery, table, wave_img, info_md, crop_which,
+                 crop_preview_out, crop_orig_out])
     genera_btn.click(on_generate, inputs=gen_set, outputs=[out_video, out_file])
     variante_btn.click(on_variante, inputs=gen_set, outputs=[out_video, out_file])
 
@@ -534,7 +730,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
     elimina_btn.click(delete_preset, inputs=[preset_dd], outputs=[preset_dd])
 
     _llm_set = {llm_provider, llm_model, llm_base_url, llm_key}
-    llm_save_btn.click(save_llm, inputs=_llm_set, outputs=[llm_status])
+    llm_save_btn.click(save_llm, inputs=_llm_set, outputs=[llm_cfg_status])
     brief_btn.click(apply_brief, inputs=_llm_set | {state, brief_text},
                     outputs=BRIEF_COMPONENTS + [llm_status])
 
@@ -542,5 +738,5 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 if __name__ == "__main__":
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         print("ATTENZIONE: 'ffmpeg' / 'ffprobe' non trovati nel PATH. "
-              "Installali (es. 'brew install ffmpeg') o il montaggio fallira'.\n")
-    demo.launch(inbrowser=True)
+              "Installali (es. 'winget install Gyan.FFmpeg') o il montaggio fallira'.\n")
+    demo.launch(inbrowser=True, css=CSS)

@@ -28,6 +28,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--aspect", choices=list(ASPECTS), default="9:16", help="Formato di output")
     p.add_argument("--fps", type=int, default=30, help="Frame rate di output")
 
+    p.add_argument("--crop-zoom", type=float, default=1.0,
+                    help="Inquadratura: >= 1 stringe il ritaglio (1.0 = riempi e basta).")
+    p.add_argument("--crop-x", type=float, default=0.5,
+                    help="Ritaglio orizzontale 0..1 (0 = sinistra, 0.5 = centro, 1 = destra).")
+    p.add_argument("--crop-y", type=float, default=0.5,
+                    help="Ritaglio verticale 0..1 (0 = alto, 0.5 = centro, 1 = basso).")
+
     p.add_argument("--style", choices=list(COLOR_STYLES), default="vivid",
                     help="Color grading di base")
     p.add_argument("--cuts-per-beat", type=float, default=1.0,
@@ -122,6 +129,9 @@ def main(argv=None) -> int:
         order_file=args.order_file,
         aspect=args.aspect,
         fps=args.fps,
+        crop_zoom=args.crop_zoom,
+        crop_x=args.crop_x,
+        crop_y=args.crop_y,
         style=args.style,
         cuts_per_beat=args.cuts_per_beat,
         accent_every=args.accent_every,

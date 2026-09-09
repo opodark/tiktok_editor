@@ -80,11 +80,12 @@ def build_image_segment(item: MediaItem, duration: float, target_w: int, target_
                          fps: int, style: str, rng: random.Random, punch_in: bool,
                          out_path: Path, pad: float = 0.0, strong: bool = False,
                          motion: str = "kenburns", motion_intensity: float = 1.0,
-                         impact: str = "", finish: str = "") -> float:
+                         impact: str = "", finish: str = "",
+                         crop_zoom: float = 1.0, crop_ax: float = 0.5, crop_ay: float = 0.5) -> float:
     """Renderizza una foto come clip di `duration + pad` secondi.
     Ritorna la durata effettivamente renderizzata."""
     total = duration + pad
-    fill = crop_to_fill(item.width, item.height, target_w, target_h)
+    fill = crop_to_fill(item.width, item.height, target_w, target_h, crop_zoom, crop_ax, crop_ay)
     kb = kenburns_filter(target_w, target_h, total, fps, rng, punch_in=punch_in, strong=strong,
                          motion=motion, intensity=motion_intensity)
     color = COLOR_STYLES.get(style, "")
@@ -111,7 +112,8 @@ def build_video_segment(item: MediaItem, duration: float, target_w: int, target_
                          impact: str = "", finish: str = "", speed: float = 1.0,
                          video_motion: bool = True, motion_intensity: float = 1.0,
                          punch: bool = False, strong: bool = False,
-                         best_start: Optional[float] = None) -> tuple[float, float]:
+                         best_start: Optional[float] = None,
+                         crop_zoom: float = 1.0, crop_ax: float = 0.5, crop_ay: float = 0.5) -> tuple[float, float]:
     """Renderizza uno spezzone video di `duration + pad` secondi.
 
     `speed` < 1 = slow motion (serve meno girato), > 1 = accelerato.
@@ -139,7 +141,7 @@ def build_video_segment(item: MediaItem, duration: float, target_w: int, target_
     real_src = max(0.0, min(src_needed, avail - start))
     shortfall = max(0.0, want - real_src / speed)
 
-    parts = [crop_to_fill(item.width, item.height, target_w, target_h)]
+    parts = [crop_to_fill(item.width, item.height, target_w, target_h, crop_zoom, crop_ax, crop_ay)]
     color = COLOR_STYLES.get(style, "")
     if color:
         parts.append(color)
@@ -173,7 +175,8 @@ def build_video_segment(item: MediaItem, duration: float, target_w: int, target_
 
 def _render_one(i: int, seg: Segment, target_w: int, target_h: int, fps: int, style: str,
                  seed: int, work_dir: Path, pad: float,
-                 motion: str, motion_intensity: float, finish: str) -> None:
+                 motion: str, motion_intensity: float, finish: str,
+                 crop: tuple = (1.0, 0.5, 0.5)) -> None:
     # ogni worker ha il proprio Random derivato dal seed globale + indice,
     # cosi' il risultato resta riproducibile anche in parallelo.
     local_rng = random.Random(seed + i if seed is not None else None)
@@ -181,11 +184,13 @@ def _render_one(i: int, seg: Segment, target_w: int, target_h: int, fps: int, st
     eff_style = seg.color_style or style
     eff_motion = seg.motion or motion
     impact = IMPACT_EFFECTS.get(seg.impact_key, "")
+    cz, cax, cay = crop
     if seg.item.kind == "image":
         rdur = build_image_segment(seg.item, seg.duration, target_w, target_h, fps, eff_style,
                                     local_rng, punch_in=seg.accented, out_path=out_path, pad=pad,
                                     strong=seg.strong, motion=eff_motion,
-                                    motion_intensity=motion_intensity, impact=impact, finish=finish)
+                                    motion_intensity=motion_intensity, impact=impact, finish=finish,
+                                    crop_zoom=cz, crop_ax=cax, crop_ay=cay)
         seg.render_duration = rdur
     else:
         core, rdur = build_video_segment(
@@ -194,6 +199,7 @@ def _render_one(i: int, seg: Segment, target_w: int, target_h: int, fps: int, st
             speed=seg.video_speed, motion_intensity=motion_intensity,
             punch=seg.accented, strong=seg.strong,
             best_start=getattr(seg.item, "best_start", None),
+            crop_zoom=cz, crop_ax=cax, crop_ay=cay,
         )
         seg.duration = core
         seg.render_duration = rdur
@@ -224,7 +230,7 @@ def render_segments(segments: List[Segment], target_w: int, target_h: int, fps: 
                      style: str, rng: random.Random, work_dir: Path,
                      jobs: int = 0, xfade_duration: float = 0.18, chunk_size: int = 10,
                      motion: str = "kenburns", motion_intensity: float = 1.0,
-                     finish: str = "") -> None:
+                     finish: str = "", crop: tuple = (1.0, 0.5, 0.5)) -> None:
     """Renderizza tutti i segmenti, in parallelo su piu' processi ffmpeg."""
     work_dir.mkdir(parents=True, exist_ok=True)
     jobs = jobs or min(8, (os.cpu_count() or 4))
@@ -234,7 +240,7 @@ def render_segments(segments: List[Segment], target_w: int, target_h: int, fps: 
     with ThreadPoolExecutor(max_workers=jobs) as ex:
         futures = {
             ex.submit(_render_one, i, seg, target_w, target_h, fps, style, seed, work_dir,
-                      pads[i], motion, motion_intensity, finish): i
+                      pads[i], motion, motion_intensity, finish, crop): i
             for i, seg in enumerate(segments)
         }
         done = 0

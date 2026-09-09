@@ -214,11 +214,21 @@ def pick_motion(rng: random.Random, base: str, variety: float) -> str:
     return rng.choice(pool)
 
 
-def crop_to_fill(src_w: int, src_h: int, target_w: int, target_h: int) -> str:
-    """scale+crop che riempie il frame target senza deformare."""
+def crop_to_fill(src_w: int, src_h: int, target_w: int, target_h: int,
+                  zoom: float = 1.0, ax: float = 0.5, ay: float = 0.5) -> str:
+    """scale+crop che riempie il frame target senza deformare.
+
+    `zoom` >= 1 stringe l'inquadratura (piu' alto = piu' vicino). `ax`/`ay`
+    in [0,1] spostano il ritaglio: 0.5 = centro, 0 = alto/sinistra,
+    1 = basso/destra. Con zoom=1 e ax=ay=0.5 e' il vecchio crop centrato.
+    """
+    z = max(1.0, float(zoom))
+    ax = min(1.0, max(0.0, float(ax)))
+    ay = min(1.0, max(0.0, float(ay)))
+    sw, sh = int(round(target_w * z)), int(round(target_h * z))
     return (
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
-        f"crop={target_w}:{target_h}"
+        f"scale={sw}:{sh}:force_original_aspect_ratio=increase,"
+        f"crop={target_w}:{target_h}:x=(iw-ow)*{ax:.4f}:y=(ih-oh)*{ay:.4f}"
     )
 
 
