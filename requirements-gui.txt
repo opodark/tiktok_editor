@@ -1,0 +1,6 @@
+-r requirements.txt
+gradio>=4.0
+
+# opzionali: solo per la sezione "Brief AI" (uno dei due, secondo il provider)
+openai>=1.40
+anthropic>=0.40

@@ -1,0 +1,8 @@
+# Normalizza i fine-riga: repo condiviso fra macOS e Windows.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.command text eol=lf
+*.png binary
+*.jpg binary
+*.mp3 binary
+*.wav binary

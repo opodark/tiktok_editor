@@ -1,0 +1,44 @@
+# --- ambienti virtuali -------------------------------------------------
+.venv/
+.venv-*/
+venv/
+env/
+
+# --- cache / build Python --------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- config con segreti ---------------------------------------------
+# contiene la API key del provider LLM: si versiona solo l'esempio
+llm_config.json
+
+# --- output / file di lavoro --------------------------------------
+*.mp4
+*.mov
+*.mkv
+output*.mp4
+autoedit_*/          # cartelle temporanee della pipeline
+
+# --- preset dell'utente (si tengono solo quelli inclusi) ------------
+presets/*.json
+!presets/Cinematico calmo.json
+!presets/TikTok hype.json
+!presets/Vintage VHS.json
+
+# --- spazzatura di sistema ----------------------------------------
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# --- editor -------------------------------------------------------
+.idea/
+.vscode/
+*.swp

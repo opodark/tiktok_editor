@@ -1,0 +1,7 @@
+{
+  "provider": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "model": "llama3.1",
+  "api_key": "",
+  "timeout": 180.0
+}
