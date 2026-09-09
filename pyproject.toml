@@ -31,6 +31,7 @@ gui = ["gradio>=4.0"]
 ai = ["openai>=1.40", "anthropic>=0.40"]
 svg = ["cairosvg>=2.7"]                       # rasterizza SVG grezzo (alternativa: binario 'resvg' sul PATH)
 all = ["gradio>=4.0", "openai>=1.40", "anthropic>=0.40", "cairosvg>=2.7"]
+dev = ["pytest>=8"]
 
 [project.scripts]
 autoedit = "autoedit.cli:main"
@@ -44,3 +45,8 @@ packages = ["autoedit"]
 
 [tool.setuptools.package-data]
 autoedit = ["py.typed", "assets_data/fonts/*.ttf", "assets_data/fonts/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
