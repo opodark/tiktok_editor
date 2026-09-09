@@ -36,11 +36,18 @@ except ImportError:
 import numpy as np
 from PIL import Image, ImageDraw
 
+from autoedit.assets import (
+    TEMPLATES, AssetSpec, capabilities as asset_capabilities, render_asset, validate_asset_spec,
+)
 from autoedit.beats import detect_beats
-from autoedit.brief import LLMConfig, load_llm_config, save_llm_config, suggest_overrides
+from autoedit.brief import (
+    LLMConfig, load_llm_config, save_llm_config, suggest_asset, suggest_overrides,
+)
 from autoedit.effects import COLOR_LABELS, EDIT_STYLE_LABELS, IMPACT_LABELS, MOTION_LABELS
 from autoedit.media import IMAGE_EXT, VIDEO_EXT
 from autoedit.pipeline import ASPECTS, RenderConfig, run_pipeline
+
+from dataclasses import asdict as _asdict
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 for _noisy in ("numba", "librosa", "matplotlib"):
@@ -333,6 +340,7 @@ def _do_generate(state, p: dict, force_seed, progress) -> tuple[str, str]:
         watermark_pos=WM_POS.get(p.get("wm_pos"), "br"),
         watermark_scale=float(p.get("wm_scale") or 0.15),
         watermark_opacity=float(p.get("wm_opacity") or 0.85),
+        overlay_specs=tuple(p.get("overlay_specs") or ()),
         shuffle=bool(p.get("shuffle")),
         max_duration=float(p["max_dur"]) if p.get("max_dur") else None,
         jobs=int(p.get("jobs") or 0),
@@ -511,6 +519,46 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                                          info="Larghezza come frazione del video.")
                     wm_opacity = gr.Slider(0.2, 1.0, value=0.85, step=0.05, label="Opacità")
 
+            with gr.Accordion("✨ Grafica generata (LLM)", open=False):
+                gr.Markdown(
+                    "<div class='hint'>Descrivi un elemento grafico (logo, card titolo, badge, "
+                    "@handle, prezzo, CTA…). Il modello grafica lo genera come PNG trasparente; "
+                    "puoi ritoccare il JSON e rigenerare, poi aggiungerlo al montaggio.</div>")
+                asset_brief = gr.Textbox(
+                    lines=2, label="Cosa generare",
+                    placeholder="es. badge rosso «RUBATA» · titolo «Come mi hanno rubato la moto» · "
+                                "wordmark «MOTO LIFE» con LIFE rosa · @opodark in basso")
+                asset_kind = gr.Radio(
+                    ["Auto", "Template", "SVG", "Maschera testo"], value="Auto",
+                    label="Tipo", info="Auto = sceglie il modello. «Maschera testo» = il video "
+                                       "scorrerà dentro le lettere.")
+                asset_gen_btn = gr.Button("✨ Genera grafica", variant="primary")
+                asset_status = gr.Markdown()
+                with gr.Row():
+                    asset_preview = gr.Image(label="Anteprima PNG", interactive=False, height=300)
+                    asset_spec_box = gr.Code(label="AssetSpec (JSON) — modificabile", language="json")
+                asset_rerender_btn = gr.Button("↻ Rigenera dal JSON")
+
+                gr.Markdown("<div class='hint'>Posizionamento nel video:</div>")
+                with gr.Row():
+                    asset_pos = gr.Dropdown(
+                        ["center", "top", "bottom", "left", "right", "tl", "tr", "bl", "br"],
+                        value="center", label="Posizione")
+                    asset_scale = gr.Slider(0.05, 1.0, value=0.6, step=0.02,
+                                            label="Dimensione", info="Larghezza come frazione del video.")
+                    asset_opacity = gr.Slider(0.2, 1.0, value=1.0, step=0.05, label="Opacità")
+                with gr.Row():
+                    asset_timed = gr.Checkbox(value=False, label="Solo per un tratto",
+                                              info="Altrimenti resta per tutto il video.")
+                    asset_start = gr.Number(value=0.0, label="Da (s)")
+                    asset_dur = gr.Number(value=3.0, label="Durata (s)")
+                with gr.Row():
+                    asset_add_btn = gr.Button("➕ Aggiungi al montaggio", variant="secondary")
+                    asset_clear_btn = gr.Button("🗑️ Svuota", variant="stop")
+                asset_queue_md = gr.Markdown("*Nessuna grafica aggiunta.*")
+                asset_queue = gr.State([])
+                asset_cur = gr.State(None)
+
         # =================================================================
         # 4 · GENERA
         # =================================================================
@@ -549,16 +597,20 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                         label="Provider",
                         info="«Compatibile OpenAI» copre Ollama, LM Studio, llama.cpp, vLLM…")
                     llm_model = gr.Textbox(
-                        value=_llm0.model, label="Modello",
+                        value=_llm0.model, label="Modello (brief montaggio)",
                         placeholder="qwen2.5:7b  ·  hf.co/utente/repo:Q4_K_M  ·  claude-sonnet-5",
                         info="Nome esatto del modello nel provider.")
                 with gr.Row():
+                    llm_asset_model = gr.Textbox(
+                        value=_llm0.asset_model, label="Modello per la grafica (vuoto = come sopra)",
+                        placeholder="qwen2.5-coder:14b",
+                        info="Un modello 'coder' fa SVG e layout più puliti.")
                     llm_base_url = gr.Textbox(
                         value=_llm0.base_url, label="Base URL",
                         placeholder="http://localhost:11434/v1",
                         info="Vuoto = default del provider. Ollama: http://localhost:11434/v1")
-                    llm_key = gr.Textbox(value=_llm0.api_key, label="API key", type="password",
-                                         info="I modelli locali di solito non la richiedono.")
+                llm_key = gr.Textbox(value=_llm0.api_key, label="API key", type="password",
+                                     info="I modelli locali di solito non la richiedono.")
                 llm_save_btn = gr.Button("Salva connessione", variant="secondary")
                 llm_cfg_status = gr.Markdown()
 
@@ -595,6 +647,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
             "crop_zoom": d[crop_zoom], "crop_x": d[crop_x], "crop_y": d[crop_y],
             "fps": d[fps_set], "jobs": d[jobs_set], "chunk_size": d[chunk_set],
             "keep_temp": d[keep_temp],
+            "overlay_specs": d[asset_queue],
         }
 
     def on_generate(d, progress=gr.Progress()):
@@ -643,6 +696,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
             provider=LLM_PROVIDERS.get(d[llm_provider], "openai"),
             base_url=(d[llm_base_url] or "").strip(),
             model=(d[llm_model] or "").strip(),
+            asset_model=(d[llm_asset_model] or "").strip(),
             api_key=(d[llm_key] or "").strip(),
         )
 
@@ -703,6 +757,75 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         applied = ", ".join(f"`{k}`" for k in ov)
         return [_brief_update(k, ov) for k in BRIEF_KEYS] + [f"✅ Applicato: {applied}"]
 
+    # ---- grafica generata (LLM -> AssetSpec -> PNG) ----
+    _KIND_HINT = {"Template": "\n(genera come 'template')", "SVG": "\n(genera come kind='svg')",
+                  "Maschera testo": "\n(genera come kind='text_mask')", "Auto": ""}
+
+    def _spec_to_preview(spec: AssetSpec):
+        d = Path(tempfile.mkdtemp(prefix="autoedit_asset_"))
+        png = render_asset(spec, d)
+        return str(png), {"png": str(png), "spec": _asdict(spec)}
+
+    def _queue_md(q):
+        if not q:
+            return "*Nessuna grafica aggiunta.*"
+        rows = []
+        for i, x in enumerate(q):
+            line = f"{i + 1}. `{Path(x['png']).name}` · {x['pos']} · scala {x['scale']:.2f}"
+            if x.get("dur"):
+                line += f" · {x['start']:.1f}–{x['start'] + x['dur']:.1f}s"
+            rows.append(line)
+        return "**In coda:**\n" + "\n".join(rows)
+
+    def on_asset_generate(d):
+        brief = (d[asset_brief] or "").strip()
+        if not brief:
+            return gr.update(), gr.update(), "⚠️ Scrivi cosa vuoi generare.", gr.update()
+        ctx = {"aspect": ASPECT_LABELS.get(d[aspect], "9:16")}
+        try:
+            spec = suggest_asset(_llm_cfg(d), brief + _KIND_HINT.get(d[asset_kind], ""), ctx)
+            png, cur = _spec_to_preview(spec)
+        except Exception as e:  # noqa: BLE001
+            return gr.update(), gr.update(), f"❌ {e}", gr.update()
+        js = json.dumps(_asdict(spec), indent=2, ensure_ascii=False)
+        return png, js, f"✅ {spec.kind} · {spec.template or spec.asset_id}", cur
+
+    def on_asset_rerender(js):
+        try:
+            spec = validate_asset_spec(json.loads(js or "{}"))
+            png, cur = _spec_to_preview(spec)
+        except Exception as e:  # noqa: BLE001
+            return gr.update(), f"❌ {e}", gr.update()
+        return png, f"✅ rigenerato · {spec.kind}", cur
+
+    def on_asset_add(cur, pos, scale, opacity, timed, start, dur, q):
+        if not cur or not cur.get("png"):
+            return q, "⚠️ Genera prima una grafica."
+        q = list(q or [])
+        item = {"png": cur["png"], "pos": pos,
+                "scale": float(scale), "opacity": float(opacity)}
+        if timed:
+            item["start"] = float(start or 0.0)
+            item["dur"] = float(dur or 3.0)
+        q.append(item)
+        return q, _queue_md(q)
+
+    def on_asset_clear():
+        return [], _queue_md([])
+
+    _asset_gen_in = {asset_brief, asset_kind, aspect, llm_provider, llm_model,
+                     llm_asset_model, llm_base_url, llm_key}
+    asset_gen_btn.click(on_asset_generate, inputs=_asset_gen_in,
+                        outputs=[asset_preview, asset_spec_box, asset_status, asset_cur])
+    asset_rerender_btn.click(on_asset_rerender, inputs=[asset_spec_box],
+                             outputs=[asset_preview, asset_status, asset_cur])
+    asset_add_btn.click(
+        on_asset_add,
+        inputs=[asset_cur, asset_pos, asset_scale, asset_opacity, asset_timed,
+                asset_start, asset_dur, asset_queue],
+        outputs=[asset_queue, asset_queue_md])
+    asset_clear_btn.click(on_asset_clear, outputs=[asset_queue, asset_queue_md])
+
     # ---- anteprima ritaglio ----
     _crop_inputs = [state, crop_which, aspect, crop_zoom, crop_x, crop_y]
     _crop_outputs = [crop_preview_out, crop_orig_out]
@@ -717,6 +840,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         title_pos, title_start, title_dur, wm_file, wm_pos, wm_scale, wm_opacity, hook_hold,
         audio_start, beat_offset, xfade_ms, snap_onsets, dynamic_pacing, strong_only, shuffle,
         max_dur, seed, crop_zoom, crop_x, crop_y, fps_set, jobs_set, chunk_set, keep_temp,
+        asset_queue,
     }
     analizza_btn.click(
         _do_analyze, inputs=[files, audio],
@@ -729,7 +853,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
     salva_btn.click(save_preset, inputs=gen_set | {preset_name}, outputs=[preset_dd])
     elimina_btn.click(delete_preset, inputs=[preset_dd], outputs=[preset_dd])
 
-    _llm_set = {llm_provider, llm_model, llm_base_url, llm_key}
+    _llm_set = {llm_provider, llm_model, llm_asset_model, llm_base_url, llm_key}
     llm_save_btn.click(save_llm, inputs=_llm_set, outputs=[llm_cfg_status])
     brief_btn.click(apply_brief, inputs=_llm_set | {state, brief_text},
                     outputs=BRIEF_COMPONENTS + [llm_status])

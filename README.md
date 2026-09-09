@@ -100,6 +100,12 @@ python -m autoedit.assets --out ./_assets_demo   # renders every template
 - **Text masks** — white text on transparent, to run video *inside the letters*
   via ffmpeg's `alphamerge` / `maskedmerge`.
 
+In the GUI (**3 · Grafica & Testo → ✨ Grafica generata**) you describe an element
+in words; a local LLM emits an `AssetSpec` (validated + sanitized), it renders to a
+PNG you can tweak as JSON and re-render, then place and queue into the montage.
+Set a separate *asset model* in ⚙️ Impostazioni — a coder model (`qwen2.5-coder`)
+writes cleaner SVG/layout than a chat model.
+
 Bundled fonts (`autoedit/assets_data/fonts/`): **Anton** and **Inter**, both SIL OFL
 (licenses included) — same result on macOS and Windows, fine for commercial use.
 

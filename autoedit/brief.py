@@ -31,6 +31,8 @@ class LLMConfig:
     # default: Ollama in locale. Vuoto = endpoint di default del provider.
     base_url: str = "http://localhost:11434/v1"
     model: str = ""              # es. "qwen2.5:7b", "hf.co/utente/repo:Q4_K_M", "claude-sonnet-5"
+    asset_model: str = ""        # modello per la grafica generata (vuoto = usa `model`);
+                                 # un modello "coder" fa SVG piu' puliti
     api_key: str = ""
     timeout: float = 180.0        # i modelli locali possono essere lenti
 
@@ -238,3 +240,48 @@ def suggest_overrides(cfg: LLMConfig, brief: str, context: dict) -> dict:
     chat = _chat_anthropic if cfg.provider == "anthropic" else _chat_openai
     text = chat(cfg, _system_prompt(), _user_prompt(brief, context))
     return validate_overrides(_extract_json(text))
+
+
+# --------------------------------------------------------------------------
+# Grafica generata: brief -> AssetSpec
+# --------------------------------------------------------------------------
+def _asset_system_prompt() -> str:
+    from .assets import asset_schema_text
+    return (
+        "Sei un art director di grafica per reel verticali (TikTok / Reels). "
+        "Dato un brief, produci UN elemento grafico: un logo/wordmark, una card "
+        "titolo, un lower-third, un @handle, un badge, un cartellino prezzo, una "
+        "call-to-action, oppure -- se serve una forma libera -- dell'SVG. "
+        "Stile pulito e ad alto contrasto, leggibile su qualsiasi sfondo. "
+        "Preferisci SEMPRE un template ai disegni SVG. Colori in #esadecimale.\n\n"
+        + asset_schema_text()
+    )
+
+
+def suggest_asset(cfg: LLMConfig, brief: str, context: dict | None = None):
+    """Chiede all'LLM un elemento grafico e ritorna un AssetSpec validato.
+
+    Usa `cfg.asset_model` se impostato (un modello 'coder' fa SVG migliori),
+    altrimenti `cfg.model`.
+    """
+    from dataclasses import replace
+
+    from .assets import validate_asset_spec
+
+    if not brief or not brief.strip():
+        raise ValueError("Scrivi cosa vuoi generare.")
+    use = replace(cfg, model=cfg.asset_model.strip() or cfg.model)
+    if not use.model.strip():
+        raise ValueError("Imposta il modello (o il 'modello grafica') nelle Impostazioni.")
+
+    ctx = context or {}
+    hint = ""
+    if ctx.get("aspect"):
+        hint += f"\nFormato del video: {ctx['aspect']} (adatta width/height)."
+    if ctx.get("palette"):
+        hint += f"\nColori coerenti col video: {ctx['palette']}."
+    user = f"BRIEF:\n{brief.strip()}{hint}"
+
+    chat = _chat_anthropic if use.provider == "anthropic" else _chat_openai
+    text = chat(use, _asset_system_prompt(), user)
+    return validate_asset_spec(_extract_json(text))

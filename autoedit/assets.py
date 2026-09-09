@@ -430,6 +430,103 @@ def capabilities() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Schema + validazione (per far generare un AssetSpec a un LLM)
+# ---------------------------------------------------------------------------
+# parametri accettati da ogni template: nome -> descrizione breve
+PARAM_HINTS: dict[str, dict[str, str]] = {
+    "wordmark": {"text": "1-3 parole", "color": "#hex del testo",
+                 "accent": "#hex: colora l'ultima parola"},
+    "title_card": {"text": "frase, va a capo da sola", "bg": "#hex barra",
+                   "bg_opacity": "0-1", "color": "#hex testo"},
+    "lower_third": {"title": "riga grande", "subtitle": "riga piccola",
+                    "bg": "#hex", "bg_opacity": "0-1", "color": "#hex", "accent": "#hex barra"},
+    "handle": {"text": "@nome", "color": "#hex", "bg": "#hex", "bg_opacity": "0-1",
+               "pos": "top|center|bottom"},
+    "badge": {"text": "1-4 caratteri (NEW, -40%, LIVE)", "bg": "#hex", "color": "#hex"},
+    "price_tag": {"price": "es. 1.900€", "old_price": "prezzo barrato sopra (opzionale)",
+                  "bg": "#hex", "color": "#hex"},
+    "cta": {"text": "1-2 parole", "bg": "#hex", "color": "#hex"},
+}
+_MAX_SVG = 6000
+_MAX_STR = 200
+
+
+def asset_schema_text() -> str:
+    """Descrizione del formato AssetSpec, da mettere nel prompt dell'LLM."""
+    tpl = "\n".join(
+        f'    - "{name}": ' + ", ".join(f"{k} ({v})" for k, v in PARAM_HINTS[name].items())
+        for name in TEMPLATES
+    )
+    return (
+        "Rispondi SOLO con un oggetto JSON valido, senza testo attorno.\n"
+        '  "kind": "template" | "svg" | "text_mask"  (preferisci "template")\n'
+        '  "template": uno di ' + ", ".join(TEMPLATES) + "  (se kind=template)\n"
+        '  "params": oggetto con i parametri del template scelto:\n' + tpl + "\n"
+        '  "svg": stringa con codice SVG completo <svg viewBox=...> ... </svg> '
+        "(solo se kind=svg; niente <script>, niente riferimenti esterni, max ~4000 caratteri)\n"
+        '  "text": stringa (solo se kind=text_mask: il video scorrera\' dentro queste lettere)\n'
+        '  "width", "height": interi in pixel (es. 1080x1920 verticale, 1080x400 una riga)\n'
+        '  "asset_id": slug breve senza spazi (es. "titolo_hook")\n'
+    )
+
+
+def _clean_params(raw) -> dict:
+    out: dict = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        if not isinstance(k, str) or len(out) >= 24:
+            continue
+        if isinstance(v, bool) or isinstance(v, (int, float)):
+            out[k] = v
+        elif isinstance(v, str):
+            out[k] = v[:_MAX_STR]
+    return out
+
+
+def validate_asset_spec(raw: dict) -> AssetSpec:
+    """Prende il JSON grezzo dell'LLM e ritorna un AssetSpec sicuro.
+    Solleva ValueError se non e' recuperabile."""
+    if not isinstance(raw, dict):
+        raise ValueError("La risposta non e' un oggetto JSON.")
+    kind = str(raw.get("kind", "template")).strip().lower()
+    if kind not in ("template", "svg", "text_mask"):
+        kind = "template"
+
+    def _dim(v, default):
+        try:
+            return int(max(64, min(4096, float(v))))
+        except (TypeError, ValueError):
+            return default
+
+    spec = AssetSpec(
+        kind=kind,
+        width=_dim(raw.get("width"), 1080),
+        height=_dim(raw.get("height"), 1920),
+        asset_id=re.sub(r"[^\w\-]", "", str(raw.get("asset_id", "asset")))[:40] or "asset",
+    )
+    if kind == "template":
+        tpl = str(raw.get("template", "")).strip().lower()
+        spec.template = tpl if tpl in _BUILDERS else "title_card"
+        spec.params = _clean_params(raw.get("params"))
+        if not spec.params:
+            # fallback: usa 'text' se il modello l'ha messo li'
+            t = raw.get("text") or raw.get("params")
+            if isinstance(t, str):
+                spec.params = {"text": t[:_MAX_STR]}
+    elif kind == "svg":
+        svg = str(raw.get("svg", "")).strip()
+        if not svg or "<svg" not in svg.lower():
+            raise ValueError("kind=svg ma manca il codice <svg>.")
+        spec.svg = sanitize_svg(svg[:_MAX_SVG])          # solleva se non valido / non sicuro
+    else:  # text_mask
+        spec.text = str(raw.get("text", "")).strip()[:_MAX_STR]
+        if not spec.text:
+            raise ValueError("kind=text_mask ma manca 'text'.")
+    return spec
+
+
+# ---------------------------------------------------------------------------
 # Demo:  python -m autoedit.assets --out ./_assets_demo
 # ---------------------------------------------------------------------------
 def _demo(out_dir: Path) -> None:

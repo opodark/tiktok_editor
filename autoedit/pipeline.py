@@ -96,8 +96,25 @@ class RenderConfig:
     title_start: float = 0.0
     title_duration: float = 2.5
 
+    # --- grafica generata / extra overlay -------------------------------
+    # ogni voce: {"png": Path, "pos": str, "scale": float (frazione larghezza),
+    #             "opacity": float, "start": float|None, "dur": float|None, "fade": float}
+    overlay_specs: tuple = ()
+
 
 _WM_POS = {"tl", "tr", "bl", "br"}
+_OVERLAY_POS = {"tl", "tr", "bl", "br", "center", "top", "bottom", "left", "right"}
+
+
+def _place(pos: str, w: int, h: int, tw: int, th: int, m: int) -> tuple[int, int]:
+    cx, cy = (tw - w) // 2, (th - h) // 2
+    return {
+        "tl": (m, m), "tr": (tw - w - m, m),
+        "bl": (m, th - h - m), "br": (tw - w - m, th - h - m),
+        "top": (cx, m), "bottom": (cx, th - h - m),
+        "left": (m, cy), "right": (tw - w - m, cy),
+        "center": (cx, cy),
+    }.get(pos, (cx, cy))
 
 
 def _build_overlays(cfg: RenderConfig, target_w: int, target_h: int, work_dir: Path) -> list[dict]:
@@ -125,6 +142,31 @@ def _build_overlays(cfg: RenderConfig, target_w: int, target_h: int, work_dir: P
         s = max(0.0, cfg.title_start)
         e = s + max(0.4, cfg.title_duration)
         overlays.append({"png": ti_png, "x": 0, "y": 0, "start": s, "end": e, "fade": 0.3})
+
+    from PIL import Image as _PILImage
+    m = int(target_w * 0.05)
+    for i, sp in enumerate(cfg.overlay_specs or ()):
+        src = Path(sp.get("png", ""))
+        if not src.is_file():
+            continue
+        im = _PILImage.open(src).convert("RGBA")
+        scale = max(0.05, min(1.0, float(sp.get("scale", 0.6))))
+        ow = max(1, int(target_w * scale))
+        oh = max(1, int(round(im.height * ow / im.width)))
+        im = im.resize((ow, oh), _PILImage.LANCZOS)
+        png = work_dir / f"overlay_{i:02d}.png"
+        im.save(png)
+        pos = sp.get("pos", "center")
+        pos = pos if pos in _OVERLAY_POS else "center"
+        x, y = _place(pos, ow, oh, target_w, target_h, m)
+        entry = {"png": png, "x": x, "y": y,
+                 "opacity": max(0.05, min(1.0, float(sp.get("opacity", 1.0))))}
+        start, dur = sp.get("start"), sp.get("dur")
+        if start is not None and dur is not None:
+            entry["start"] = max(0.0, float(start))
+            entry["end"] = entry["start"] + max(0.3, float(dur))
+            entry["fade"] = float(sp.get("fade", 0.3))
+        overlays.append(entry)
 
     return overlays
 
