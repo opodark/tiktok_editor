@@ -99,6 +99,7 @@ def _system_prompt() -> str:
 
 def _user_prompt(brief: str, context: dict) -> str:
     names = ", ".join(context.get("names", [])[:40]) or "(non ancora analizzati)"
+    pal = context.get("palette")
     return (
         f"BRIEF DELL'UTENTE:\n{brief.strip()}\n\n"
         "CONTESTO:\n"
@@ -106,7 +107,10 @@ def _user_prompt(brief: str, context: dict) -> str:
         f"{context.get('downbeats', '?')} downbeat\n"
         f"- media: {context.get('n_media', '?')} file "
         f"({context.get('n_images', '?')} foto, {context.get('n_videos', '?')} video)\n"
-        f"- nomi file: {names}"
+        f"- nomi file: {names}\n"
+        + (f"- colori dominanti dei media: {pal}\n"
+           "  (se sono saturi/neon scegli style 'neon' o 'vivid'; se cupi/desaturati 'moody' o "
+           "'cinematic'; adatta comunque lo style alla palette)\n" if pal else "")
     )
 
 
@@ -253,7 +257,10 @@ def _asset_system_prompt() -> str:
         "titolo, un lower-third, un @handle, un badge, un cartellino prezzo, una "
         "call-to-action, oppure -- se serve una forma libera -- dell'SVG. "
         "Stile pulito e ad alto contrasto, leggibile su qualsiasi sfondo. "
-        "Preferisci SEMPRE un template ai disegni SVG. Colori in #esadecimale.\n\n"
+        "Preferisci SEMPRE un template ai disegni SVG. Colori in #esadecimale.\n"
+        "USA il contesto: prendi i colori dalla palette dei media, e ricava il "
+        "TESTO dai nomi file e dal tono descritto (non inventare parole generiche "
+        "tipo 'Innovazione' o 'Futuristico').\n\n"
         + asset_schema_text()
     )
 
@@ -279,7 +286,11 @@ def suggest_asset(cfg: LLMConfig, brief: str, context: dict | None = None):
     if ctx.get("aspect"):
         hint += f"\nFormato del video: {ctx['aspect']} (adatta width/height)."
     if ctx.get("palette"):
-        hint += f"\nColori coerenti col video: {ctx['palette']}."
+        hint += f"\nPalette dei media (usa questi #hex): {ctx['palette']}."
+    if ctx.get("mood"):
+        hint += f"\nTono/contenuto: {ctx['mood']}."
+    if ctx.get("names"):
+        hint += "\nNomi file (per ricavare il testo): " + ", ".join(str(n) for n in ctx["names"][:30])
     user = f"BRIEF:\n{brief.strip()}{hint}"
 
     chat = _chat_anthropic if use.provider == "anthropic" else _chat_openai

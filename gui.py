@@ -257,16 +257,20 @@ def _do_analyze(files, audio):
     wave = work / "wave.png"
     _waveform_png(audio_path, bi, wave)
 
+    from autoedit.palette import describe as _describe_palette
+    palette = _describe_palette([m["thumb"] for m in metas], k=4)
+
     gallery = [(m["thumb"], f'{i} · {m["orig"]}') for i, m in enumerate(metas)]
     table = [[i, m["orig"], True, i] for i, m in enumerate(metas)]
     info = (
         f"### Brano · {bi.tempo:.0f} BPM\n"
         f"- {len(bi.beat_times)} beat · {len(bi.downbeat_times)} downbeat (gialli) · "
         f"{len(bi.strong_times)} beat forti (rossi) · {len(bi.onset_times)} transienti\n"
-        f"- durata {bi.duration:.1f}s · **{len(metas)} media** caricati"
+        f"- durata {bi.duration:.1f}s · **{len(metas)} media** caricati\n"
+        f"- palette: {palette or 'n/d'}"
     )
     state = {"work": str(work), "media_dir": str(media_dir),
-             "audio": str(audio_path), "metas": metas,
+             "audio": str(audio_path), "metas": metas, "palette": palette,
              "beat": {"bpm": round(float(bi.tempo)), "duration": round(float(bi.duration), 1),
                       "downbeats": int(len(bi.downbeat_times))}}
     which_choices = [f'{i} · {m["orig"]}' for i, m in enumerate(metas)]
@@ -746,6 +750,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
             "n_images": sum(1 for m in metas if m.get("kind") == "image"),
             "n_videos": sum(1 for m in metas if m.get("kind") == "video"),
             "names": [m.get("orig", "") for m in metas],
+            "palette": st.get("palette", ""),
         }
         try:
             ov = suggest_overrides(_llm_cfg(d), d[brief_text] or "", context)
@@ -781,7 +786,16 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         brief = (d[asset_brief] or "").strip()
         if not brief:
             return gr.update(), gr.update(), "⚠️ Scrivi cosa vuoi generare.", gr.update()
+        st = d[state] or {}
+        metas = st.get("metas", [])
         ctx = {"aspect": ASPECT_LABELS.get(d[aspect], "9:16")}
+        if st.get("palette"):
+            ctx["palette"] = st["palette"]
+        if metas:
+            ctx["names"] = [m.get("orig", "") for m in metas][:30]
+            ctx["mood"] = (f"{len(metas)} media "
+                           f"({sum(1 for m in metas if m.get('kind') == 'image')} foto, "
+                           f"{sum(1 for m in metas if m.get('kind') == 'video')} video)")
         try:
             spec = suggest_asset(_llm_cfg(d), brief + _KIND_HINT.get(d[asset_kind], ""), ctx)
             png, cur = _spec_to_preview(spec)
@@ -813,7 +827,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
     def on_asset_clear():
         return [], _queue_md([])
 
-    _asset_gen_in = {asset_brief, asset_kind, aspect, llm_provider, llm_model,
+    _asset_gen_in = {state, asset_brief, asset_kind, aspect, llm_provider, llm_model,
                      llm_asset_model, llm_base_url, llm_key}
     asset_gen_btn.click(on_asset_generate, inputs=_asset_gen_in,
                         outputs=[asset_preview, asset_spec_box, asset_status, asset_cur])
