@@ -29,7 +29,8 @@ dependencies = [
 [project.optional-dependencies]
 gui = ["gradio>=4.0"]
 ai = ["openai>=1.40", "anthropic>=0.40"]
-all = ["gradio>=4.0", "openai>=1.40", "anthropic>=0.40"]
+svg = ["cairosvg>=2.7"]                       # rasterizza SVG grezzo (alternativa: binario 'resvg' sul PATH)
+all = ["gradio>=4.0", "openai>=1.40", "anthropic>=0.40", "cairosvg>=2.7"]
 
 [project.scripts]
 autoedit = "autoedit.cli:main"
@@ -42,4 +43,4 @@ Issues = "https://github.com/opodark/tiktok_editor/issues"
 packages = ["autoedit"]
 
 [tool.setuptools.package-data]
-autoedit = ["py.typed"]
+autoedit = ["py.typed", "assets_data/fonts/*.ttf", "assets_data/fonts/*.txt"]

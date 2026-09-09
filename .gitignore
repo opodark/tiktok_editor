@@ -25,6 +25,7 @@ llm_config.json
 *.mkv
 output*.mp4
 autoedit_*/          # cartelle temporanee della pipeline
+_assets_demo*/       # output di  python -m autoedit.assets
 
 # --- preset dell'utente (si tengono solo quelli inclusi) ------------
 presets/*.json

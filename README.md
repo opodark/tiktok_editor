@@ -84,6 +84,25 @@ Copy `llm_config.example.json` to `llm_config.json` and edit it, or use the pane
 *Save connection* button. **`llm_config.json` holds your API key and is git-ignored** —
 don't commit it.
 
+## Generated graphics
+
+`autoedit/assets.py` builds transparent PNGs for overlays and masks — no GPU, no
+diffusion model, it's vector/text:
+
+```sh
+python -m autoedit.assets --out ./_assets_demo   # renders every template
+```
+
+- **Templates** (`wordmark`, `title_card`, `lower_third`, `handle`, `badge`,
+  `price_tag`, `cta`) — built with PIL from a few parameters. Predictable, on-brand.
+- **Raw SVG** — sanitized, then rasterized with `resvg` (binary, best) or
+  `cairosvg` (`pip install "autoedit[svg]"`). For free-form vector art.
+- **Text masks** — white text on transparent, to run video *inside the letters*
+  via ffmpeg's `alphamerge` / `maskedmerge`.
+
+Bundled fonts (`autoedit/assets_data/fonts/`): **Anton** and **Inter**, both SIL OFL
+(licenses included) — same result on macOS and Windows, fine for commercial use.
+
 ## Notes
 
 - Presets are plain JSON in `presets/`. The three bundled ones are versioned; any
