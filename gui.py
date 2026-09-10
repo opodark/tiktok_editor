@@ -636,6 +636,11 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                     "AF scattano su ciò che l'IA riconosce (busto / presa), con palo, scheletro, "
                     "timeline dei «fermi» e HUD. Serve per capire cosa sta capendo l'IA.</div>")
                 dbg_video_in = gr.Video(label="Clip da analizzare")
+                dbg_video_path = gr.Textbox(
+                    label="…oppure incolla il percorso del file (se l'upload dà «errore video»)",
+                    placeholder=r"D:\video\allenamento_palo.mp4",
+                    info="Il file deve essere già esportato e chiuso dall'editor. "
+                         "Meglio se in una cartella normale (Desktop, Video), non in Temp.")
                 with gr.Row():
                     dbg_pole_x = gr.Slider(0.0, 1.0, value=0.0, step=0.01,
                                            label="Palo — x manuale (0 = auto)",
@@ -874,14 +879,23 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
     # ---- DEBUG: vista mirino IA ----
     def on_debug(d, progress=gr.Progress()):
-        video = d[dbg_video_in]
+        video = (d[dbg_video_path] or "").strip().strip('"') or d[dbg_video_in]
         if not video:
-            raise gr.Error("Carica una clip nella sezione DEBUG.")
+            raise gr.Error("Carica una clip (o incolla il percorso) nella sezione DEBUG.")
         try:
             from autoedit import pose, vision
         except Exception as e:  # noqa: BLE001
             raise gr.Error(f"Manca una dipendenza: {e}. Installa:  pip install \"autoedit[pose]\"")
         vpath = _as_path(video)
+        if not vpath.is_file():
+            raise gr.Error(f"File non trovato o non leggibile: {vpath}. "
+                           "Assicurati che l'export sia finito e il file chiuso.")
+        try:
+            with open(vpath, "rb") as _f:
+                _f.read(1024)
+        except Exception as e:  # noqa: BLE001
+            raise gr.Error(f"Il file è bloccato da un altro programma ({e}). "
+                           "Chiudi l'editor / attendi la fine dell'export, o copialo altrove.")
         progress(0.1, desc="Analisi pose (MediaPipe)…")
         frames = pose.analyze_video(vpath, fps_sample=8)
         seen = sum(1 for f in frames if f.lm is not None)
@@ -942,8 +956,9 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
     dbg_btn.click(
         on_debug,
-        inputs={dbg_video_in, dbg_pole_x, dbg_still, dbg_minhold, dbg_events, dbg_use_vlm,
-                dbg_moves, llm_provider, llm_model, llm_asset_model, llm_base_url, llm_key},
+        inputs={dbg_video_in, dbg_video_path, dbg_pole_x, dbg_still, dbg_minhold, dbg_events,
+                dbg_use_vlm, dbg_moves, llm_provider, llm_model, llm_asset_model,
+                llm_base_url, llm_key},
         outputs=[dbg_out, dbg_log])
 
     # ---- anteprima ritaglio ----
