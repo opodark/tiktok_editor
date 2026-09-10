@@ -190,6 +190,21 @@ def pole_x(path: Path | str, probe_frames: int = 12) -> Optional[float]:
     return float(np.median(keep)) if len(keep) >= 2 else None
 
 
+def pole_x_auto(path: Path | str, frames: list[PoseFrame]) -> tuple[Optional[float], str]:
+    """x del palo, robusta: nel pole la presa e' SUL palo, quindi i
+    keypoint sono il segnale piu' affidabile. Hough solo di conferma /
+    ripiego. Ritorna (x | None, sorgente)."""
+    kp = pole_x_from_pose(frames)
+    hg = pole_x(path)
+    if kp is not None and hg is not None and abs(kp - hg) < 0.08:
+        return (kp + hg) / 2, "keypoint+Hough"
+    if kp is not None:
+        return kp, "keypoint"
+    if hg is not None:
+        return hg, "Hough"
+    return None, "non trovato"
+
+
 def pole_x_from_pose(frames: list[PoseFrame]) -> Optional[float]:
     """Stima il palo DAL corpo: nel pole la presa (polsi/caviglie) sta
     quasi sempre incolonnata su una x. Utile quando Hough fallisce
@@ -279,7 +294,7 @@ def _smooth(frames: list[PoseFrame], k: int = 2) -> list[np.ndarray | None]:
 
 
 def detect_holds(frames: list[PoseFrame], cts: list[Contact],
-                 still: float = 0.02, min_hold: float = 0.35) -> list[Hold]:
+                 still: float = 0.012, min_hold: float = 0.6) -> list[Hold]:
     """Tratti fermi (movimento medio dei keypoint < `still`) lunghi almeno
     `min_hold` s. Il FOCUS e' il contatto iniziato piu' di recente.
     I keypoint vengono prima lisciati per togliere il jitter."""
@@ -730,11 +745,7 @@ if __name__ == "__main__":
 
     frames = analyze_video(a.video, fps_sample=a.fps, max_people=a.people)
     seen = sum(1 for f in frames if f.lm is not None)
-    px = pole_x(a.video)
-    src = "Hough"
-    if px is None:
-        px = pole_x_from_pose(frames)
-        src = "dai keypoint" if px is not None else "-"
+    px, src = pole_x_auto(a.video, frames)
     cts = contacts(frames, px)
     holds = detect_holds(frames, cts)
     events = detect_events(frames)

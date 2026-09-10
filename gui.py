@@ -646,11 +646,11 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                                            label="Palo — x manuale (0 = auto)",
                                            info="Se l'auto non lo trova: metti dove sta il palo "
                                                 "in orizzontale (0=sx, 0.5=centro, 1=dx).")
-                    dbg_still = gr.Slider(0.005, 0.06, value=0.02, step=0.005,
+                    dbg_still = gr.Slider(0.004, 0.05, value=0.012, step=0.002,
                                           label="Soglia «fermo»",
                                           info="Più alta = più tollerante (trova più fermi). "
-                                               "Alza se la ballerina si muove sempre.")
-                    dbg_minhold = gr.Slider(0.2, 1.5, value=0.35, step=0.05,
+                                               "Se ne trova troppi, abbassala.")
+                    dbg_minhold = gr.Slider(0.3, 2.0, value=0.6, step=0.1,
                                             label="Durata minima fermo (s)")
                 dbg_events = gr.Checkbox(
                     value=True, label="Segna inversioni ed estensioni massime",
@@ -903,11 +903,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         if manual > 0.0:
             px, pole_src = manual, "manuale"
         else:
-            px = pose.pole_x(vpath)
-            pole_src = "Hough"
-            if px is None:
-                px = pose.pole_x_from_pose(frames)
-                pole_src = "dai keypoint" if px is not None else "non trovato"
+            px, pole_src = pose.pole_x_auto(vpath, frames)
         cts = pose.contacts(frames, px)
         holds = pose.detect_holds(frames, cts, still=float(d[dbg_still]),
                                   min_hold=float(d[dbg_minhold]))
