@@ -659,10 +659,15 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                                                "Se ne trova troppi, abbassala.")
                     dbg_minhold = gr.Slider(0.3, 2.0, value=0.6, step=0.1,
                                             label="Durata minima fermo (s)")
-                dbg_events = gr.Checkbox(
-                    value=True, label="Segna inversioni ed estensioni massime",
-                    info="Corpo a testa in giù · braccio/gamba che raggiunge l'estensione piena · "
-                         "apertura massima delle gambe. Geometria pura dei keypoint, niente LLM.")
+                with gr.Row():
+                    dbg_events = gr.Checkbox(
+                        value=True, label="Segna inversioni ed estensioni massime",
+                        info="A testa in giù · arto all'estensione piena · apertura gambe max. "
+                             "Geometria pura dei keypoint, niente LLM.")
+                    dbg_grid = gr.Checkbox(
+                        value=False, label="Griglia mirino reflex",
+                        info="Terzi + punti AF + reticolo. Spenta = più pulito, "
+                             "restano scheletro/palo/prese/fuoco/eventi.")
                 with gr.Row():
                     dbg_use_vlm = gr.Checkbox(
                         value=False, label="Usa anche il modello visione sui fermi",
@@ -942,7 +947,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         progress(0.85, desc="Rendering mirino…")
         out = Path(tempfile.mkdtemp(prefix="autoedit_dbg_")) / "debug.mp4"
         pose.debug_video(vpath, out, frames, holds, cts, px, labels, events=events,
-                         t_start=t0, t_end=t1)
+                         t_start=t0, t_end=t1, grid=bool(d[dbg_grid]))
 
         lines = [f"**Frame campionati:** {len(frames)} · persona rilevata in **{seen}**",
                  (f"**Palo:** x={px:.3f} ({pole_src})" if px is not None
@@ -966,7 +971,8 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
     dbg_btn.click(
         on_debug,
-        inputs={dbg_video_path, dbg_t0, dbg_t1, dbg_pole_x, dbg_still, dbg_minhold, dbg_events,
+        inputs={dbg_video_path, dbg_t0, dbg_t1, dbg_pole_x, dbg_still, dbg_minhold,
+                dbg_events, dbg_grid,
                 dbg_use_vlm, dbg_moves, llm_provider, llm_model, llm_asset_model,
                 llm_base_url, llm_key},
         outputs=[dbg_out, dbg_log])

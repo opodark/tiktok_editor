@@ -529,7 +529,7 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
                 holds: list[Hold], cts: list[Contact], px_pole: Optional[float],
                 labels: Optional[dict] = None, events: Optional[list] = None,
                 t_start: float = 0.0, t_end: Optional[float] = None,
-                max_w: int = 1280, transcode: bool = True) -> Path:
+                grid: bool = False, max_w: int = 1280, transcode: bool = True) -> Path:
     """Video DEBUG: guardi attraverso un mirino da reflex e vedi DOVE
     l'IA sta mettendo il fuoco (staffe AF che scattano sulla presa /
     sul soggetto), la griglia dei punti AF, il palo, lo scheletro, e un
@@ -624,10 +624,6 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
         cv2.rectangle(ov, (0, 0), (m, h), (0, 0, 0), -1)
         cv2.rectangle(ov, (w - m, 0), (w, h), (0, 0, 0), -1)
         cv2.addWeighted(ov, 0.45, bgr, 0.55, 0, bgr)
-        for gx in (w // 3, 2 * w // 3):
-            cv2.line(bgr, (gx, m), (gx, h - m), (255, 255, 255), TF, cv2.LINE_AA)
-        for gy in (m + (h - 2 * m) // 3, m + 2 * (h - 2 * m) // 3):
-            cv2.line(bgr, (m, gy), (w - m, gy), (255, 255, 255), TF, cv2.LINE_AA)
         cl = int(34 * S)
         for sx in (m, w - m):
             for sy in (m, h - m):
@@ -635,8 +631,13 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
                 dy = cl if sy == m else -cl
                 line(bgr, (sx, sy), (sx + dx, sy), (255, 255, 255), TH)
                 line(bgr, (sx, sy), (sx, sy + dy), (255, 255, 255), TH)
-        cv2.drawMarker(bgr, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS,
-                       int(28 * S), TF)
+        if grid:
+            for gx in (w // 3, 2 * w // 3):
+                cv2.line(bgr, (gx, m), (gx, h - m), (255, 255, 255), TF, cv2.LINE_AA)
+            for gy in (m + (h - 2 * m) // 3, m + 2 * (h - 2 * m) // 3):
+                cv2.line(bgr, (m, gy), (w - m, gy), (255, 255, 255), TF, cv2.LINE_AA)
+            cv2.drawMarker(bgr, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS,
+                           int(28 * S), TF)
 
         # --- target del fuoco: bbox del fermo, o della presa, o del corpo ---
         tgt = None
@@ -657,17 +658,18 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
                 fx[j] += (v - fx[j]) * 0.35
 
         # --- griglia punti AF (verde quelli sul soggetto / target) ---
-        for r in range(af_rows):
-            for c in range(af_cols):
-                px = int(m + (w - 2 * m) * (c + 0.5) / af_cols)
-                py = int(m + (h - 2 * m) * (r + 0.5) / af_rows)
-                inside = (fx[0] - fx[2] < px < fx[0] + fx[2] and
-                          fx[1] - fx[3] < py < fx[1] + fx[3])
-                col = GREEN if (inside and (hold_now is not None or blink)) else (170, 170, 170)
-                s = int((10 if inside else 6) * S)
-                cv2.rectangle(bgr, (px - s, py - s), (px + s, py + s), (0, 0, 0), TH + TF)
-                cv2.rectangle(bgr, (px - s, py - s), (px + s, py + s), col,
-                              TH if inside else TF)
+        if grid:
+            for r in range(af_rows):
+                for c in range(af_cols):
+                    px = int(m + (w - 2 * m) * (c + 0.5) / af_cols)
+                    py = int(m + (h - 2 * m) * (r + 0.5) / af_rows)
+                    inside = (fx[0] - fx[2] < px < fx[0] + fx[2] and
+                              fx[1] - fx[3] < py < fx[1] + fx[3])
+                    col = GREEN if (inside and (hold_now is not None or blink)) else (170, 170, 170)
+                    s = int((10 if inside else 6) * S)
+                    cv2.rectangle(bgr, (px - s, py - s), (px + s, py + s), (0, 0, 0), TH + TF)
+                    cv2.rectangle(bgr, (px - s, py - s), (px + s, py + s), col,
+                                  TH if inside else TF)
 
         # --- scheletro + contatti ---
         if pf is not None and pf.lm is not None:
@@ -794,6 +796,7 @@ if __name__ == "__main__":
     ap.add_argument("--people", type=int, default=1)
     ap.add_argument("--from", dest="t0", type=float, default=0.0)
     ap.add_argument("--to", dest="t1", type=float, default=0.0)
+    ap.add_argument("--grid", action="store_true", help="mostra la griglia del mirino")
     a = ap.parse_args()
     t1 = a.t1 or None
 
@@ -816,5 +819,6 @@ if __name__ == "__main__":
     print(f"eventi ({len(events)}):")
     for e in events:
         print(f"  {e.t:5.2f}s  {e.kind:9s} {e.part:12s} {e.value:6.1f}  {e.label}")
-    debug_video(a.video, a.out, frames, holds, cts, px, events=events, t_start=a.t0, t_end=t1)
+    debug_video(a.video, a.out, frames, holds, cts, px, events=events,
+                t_start=a.t0, t_end=t1, grid=a.grid)
     print(f"anteprima -> {a.out}")
