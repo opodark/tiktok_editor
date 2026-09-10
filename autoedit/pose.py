@@ -92,6 +92,18 @@ class Hold:
         return self.t1 - self.t0
 
 
+@dataclass
+class PoseEvent:
+    """Momento 'scenico' leggibile dalla geometria dei keypoint:
+    inversione del corpo o estensione massima di un arto."""
+    kind: str                                  # "invert" | "arm_ext" | "leg_ext" | "straddle" | "line"
+    t: float
+    part: str = ""                             # arto interessato (per *_ext)
+    value: float = 0.0                         # angolo / punteggio
+    xy: tuple = (0.5, 0.5)                      # punto su cui puntare (endpoint dell'arto)
+    label: str = ""
+
+
 # --------------------------------------------------------------------------
 def analyze_video(path: Path | str, fps_sample: float = 8.0, max_people: int = 1) -> list[PoseFrame]:
     """Campiona il video a ~`fps_sample` e ritorna i keypoint per frame."""
@@ -307,6 +319,114 @@ def _finish_hold(t0, t1, focus_t, frames, cts) -> Hold:
 
 
 # --------------------------------------------------------------------------
+# Eventi "scenici": inversione del corpo, estensione massima di un arto
+# --------------------------------------------------------------------------
+def _ang(a, b, c) -> float:
+    """Angolo in gradi al vertice b, fra i segmenti b->a e b->c."""
+    ba, bc = np.asarray(a[:2]) - b[:2], np.asarray(c[:2]) - b[:2]
+    na, nc = np.linalg.norm(ba), np.linalg.norm(bc)
+    if na < 1e-6 or nc < 1e-6:
+        return 0.0
+    return float(np.degrees(np.arccos(np.clip(np.dot(ba, bc) / (na * nc), -1, 1))))
+
+
+_LIMBS = {
+    "braccio sx": ("l_shoulder", "l_elbow", "l_wrist"),
+    "braccio dx": ("r_shoulder", "r_elbow", "r_wrist"),
+    "gamba sx": ("l_hip", "l_knee", "l_ankle"),
+    "gamba dx": ("r_hip", "r_knee", "r_ankle"),
+}
+_LIMB_END = {"braccio sx": "l_wrist", "braccio dx": "r_wrist",
+             "gamba sx": "l_ankle", "gamba dx": "r_ankle"}
+
+
+def body_metrics(lm: np.ndarray) -> dict:
+    """Misure geometriche istantanee da un set di keypoint."""
+    def g(n):
+        return lm[IDX[n]]
+
+    sh = (g("l_shoulder")[:2] + g("r_shoulder")[:2]) / 2
+    hp = (g("l_hip")[:2] + g("r_hip")[:2]) / 2
+    torso = hp - sh                                  # spalle -> fianchi
+    # angolo del busto rispetto alla verticale "in giu'" (0 = in piedi, +-180 = a testa in giu')
+    tilt = float(np.degrees(np.arctan2(torso[0], torso[1])))
+    # "sottosopra" = busto oltre l'orizzontale verso l'alto. `tilt` regge meglio
+    # del confronto fianchi/spalle quando i keypoint sono rumorosi.
+    inverted = bool(abs(tilt) > 115.0 or hp[1] < sh[1] - 0.03)
+    m = {"torso_tilt": tilt, "inverted": inverted,
+         "straddle": _ang(g("l_ankle"), np.append(hp, 1.0), g("r_ankle"))}
+    for name, (a, b, c) in _LIMBS.items():
+        if min(g(a)[2], g(b)[2], g(c)[2]) >= 0.4:
+            m[name] = _ang(g(a), g(b), g(c))
+    return m
+
+
+def detect_events(frames: list[PoseFrame], ext_min: float = 165.0,
+                  straddle_min: float = 150.0) -> list[PoseEvent]:
+    """Trova: inversioni (busto a testa in giu') e i PICCHI di estensione
+    di braccia/gambe (arto quasi dritto -> angolo ~180 in un massimo locale)."""
+    ev: list[PoseEvent] = []
+    sm = _smooth(frames)
+    metr = [body_metrics(l) if l is not None else None for l in sm]
+
+    # --- inversioni: run contigui (min 2 frame) ---
+    run = None
+    for i, mm in enumerate(metr):
+        inv = mm is not None and mm["inverted"]
+        if inv and run is None:
+            run = i
+        elif not inv and run is not None:
+            if i - run < 2:                          # lampo isolato: rumore, ignora
+                run = None
+                continue
+            j = max(range(run, i), key=lambda k: abs(metr[k]["torso_tilt"]))
+            mm2 = metr[j]
+            ev.append(PoseEvent("invert", frames[j].t, value=mm2["torso_tilt"],
+                                xy=tuple(((sm[j][IDX["l_hip"]][:2] + sm[j][IDX["r_hip"]][:2]) / 2)),
+                                label="A TESTA IN GIU'"))
+            run = None
+    if run is not None:
+        j = max(range(run, len(metr)), key=lambda k: abs(metr[k]["torso_tilt"]))
+        ev.append(PoseEvent("invert", frames[j].t, value=metr[j]["torso_tilt"],
+                            xy=tuple(((sm[j][IDX["l_hip"]][:2] + sm[j][IDX["r_hip"]][:2]) / 2)),
+                            label="A TESTA IN GIU'"))
+
+    # --- picchi di estensione per ogni arto ---
+    # serve PROMINENZA: l'arto deve essersi prima piegato (< thresh-flex) e poi
+    # essersi disteso; altrimenti un arto sempre dritto spara eventi ad ogni frame.
+    def peaks(series, times, thresh, kind, part, flex=28.0):
+        last = -9.0
+        min_since = 999.0
+        for i in range(1, len(series) - 1):
+            a, b, c = series[i - 1], series[i], series[i + 1]
+            if b is None:
+                continue
+            min_since = min(min_since, b)
+            if a is None or c is None:
+                continue
+            local_max = b >= a and b >= c
+            if (local_max and b >= thresh and (thresh - min_since) >= flex
+                    and times[i] - last > 0.6):
+                last = times[i]
+                min_since = b
+                yield PoseEvent(kind, times[i], part=part, value=b, label=f"MAX EST · {part}")
+
+    T = [f.t for f in frames]
+    for part in _LIMBS:
+        s = [mm.get(part) if mm else None for mm in metr]
+        for e in peaks(s, T, ext_min, "arm_ext" if "braccio" in part else "leg_ext", part):
+            k = min(range(len(frames)), key=lambda x: abs(frames[x].t - e.t))
+            if sm[k] is not None:
+                e.xy = tuple(sm[k][IDX[_LIMB_END[part]]][:2])
+            ev.append(e)
+    sstr = [mm.get("straddle") if mm else None for mm in metr]
+    for e in peaks(sstr, T, straddle_min, "straddle", "gambe"):
+        e.label = "APERTURA MAX"
+        ev.append(e)
+    return sorted(ev, key=lambda x: x.t)
+
+
+# --------------------------------------------------------------------------
 def annotate(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
              holds: list[Hold], px_pole: Optional[float]) -> Path:
     """Video di anteprima: scheletro + palo + contatti + barra dei fermi."""
@@ -386,7 +506,8 @@ def _torso_bbox(lm: np.ndarray):
 
 def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
                 holds: list[Hold], cts: list[Contact], px_pole: Optional[float],
-                labels: Optional[dict] = None, transcode: bool = True) -> Path:
+                labels: Optional[dict] = None, events: Optional[list] = None,
+                transcode: bool = True) -> Path:
     """Video DEBUG: guardi attraverso un mirino da reflex e vedi DOVE
     l'IA sta mettendo il fuoco (staffe AF che scattano sulla presa /
     sul soggetto), la griglia dei punti AF, il palo, lo scheletro, e un
@@ -404,6 +525,9 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
     dur = total / fps if total else (frames[-1].t if frames else 1.0)
     by_t = sorted(frames, key=lambda f: f.t)
     labels = labels or {}
+    events = events or []
+    EV_COL = {"invert": (240, 80, 240), "arm_ext": (255, 220, 40),
+              "leg_ext": (255, 220, 40), "straddle": (255, 140, 40)}
 
     raw = Path(out_path).with_suffix(".raw.mp4") if transcode else Path(out_path)
     vw = cv2.VideoWriter(str(raw), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
@@ -511,6 +635,21 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
             cv2.rectangle(bgr, (int(fx[0] - fx[2]), int(fx[1] - fx[3])),
                           (int(fx[0] + fx[2]), int(fx[1] + fx[3])), GREEN, 1)
 
+        # --- eventi scenici: inversione / estensione massima ---
+        active_ev = [e for e in events if -0.2 <= t - e.t <= 0.55]
+        for e in active_ev:
+            d = t - e.t
+            ec = EV_COL.get(e.kind, (255, 255, 255))
+            ex, ey = int(e.xy[0] * w), int(e.xy[1] * h)
+            rad = int(16 + max(0.0, d) * 240)                   # anello che si espande e sfuma
+            cv2.circle(bgr, (ex, ey), rad, ec, 2, cv2.LINE_AA)
+            cv2.drawMarker(bgr, (ex, ey), ec, cv2.MARKER_TILTED_CROSS, 22, 2)
+        if active_ev:                                           # un solo tag per volta, in alto
+            e = min(active_ev, key=lambda x: abs(t - x.t))
+            ec = EV_COL.get(e.kind, (255, 255, 255))
+            tag = (e.label or e.kind.upper()) + (f"  {e.value:.0f}°" if e.value else "")
+            cv2.putText(bgr, tag, (m + 12, m + 44), FT, 0.7, ec, 2, cv2.LINE_AA)
+
         # --- HUD ---
         tc = f"{int(t // 60):02d}:{int(t % 60):02d}:{int((t * fps) % fps):02d}"
         if blink:
@@ -534,6 +673,10 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
             x0 = int(m + hd.t0 / dur * (w - 2 * m))
             x1 = int(m + hd.t1 / dur * (w - 2 * m))
             cv2.line(bgr, (x0, y), (x1, y), GREEN, 6)
+        for e in events:
+            ex = int(m + e.t / dur * (w - 2 * m))
+            cv2.drawMarker(bgr, (ex, y), EV_COL.get(e.kind, (255, 255, 255)),
+                           cv2.MARKER_DIAMOND, 12, 2)
         cv2.drawMarker(bgr, (int(m + t / dur * (w - 2 * m)), y), (255, 255, 255),
                        cv2.MARKER_TRIANGLE_DOWN, 12, 2)
 
@@ -594,6 +737,7 @@ if __name__ == "__main__":
         src = "dai keypoint" if px is not None else "-"
     cts = contacts(frames, px)
     holds = detect_holds(frames, cts)
+    events = detect_events(frames)
 
     print(f"frame campionati: {len(frames)}  (persona rilevata in {seen})")
     print(f"palo: x={px:.3f}  ({src})" if px is not None else "palo: non trovato")
@@ -603,5 +747,8 @@ if __name__ == "__main__":
     print(f"fermi ({len(holds)}):")
     for hd in holds:
         print(f"  {hd.t0:5.2f}-{hd.t1:5.2f}s  focus@{hd.focus_t:.2f}s  parte={PART_IT.get(hd.focus_part, hd.focus_part or '?')}")
-    annotate(a.video, a.out, frames, holds, px)
+    print(f"eventi ({len(events)}):")
+    for e in events:
+        print(f"  {e.t:5.2f}s  {e.kind:9s} {e.part:12s} {e.value:6.1f}  {e.label}")
+    debug_video(a.video, a.out, frames, holds, cts, px, events=events)
     print(f"anteprima -> {a.out}")

@@ -647,6 +647,10 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                                                "Alza se la ballerina si muove sempre.")
                     dbg_minhold = gr.Slider(0.2, 1.5, value=0.35, step=0.05,
                                             label="Durata minima fermo (s)")
+                dbg_events = gr.Checkbox(
+                    value=True, label="Segna inversioni ed estensioni massime",
+                    info="Corpo a testa in giù · braccio/gamba che raggiunge l'estensione piena · "
+                         "apertura massima delle gambe. Geometria pura dei keypoint, niente LLM.")
                 with gr.Row():
                     dbg_use_vlm = gr.Checkbox(
                         value=False, label="Usa anche il modello visione sui fermi",
@@ -893,6 +897,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         cts = pose.contacts(frames, px)
         holds = pose.detect_holds(frames, cts, still=float(d[dbg_still]),
                                   min_hold=float(d[dbg_minhold]))
+        events = pose.detect_events(frames) if d[dbg_events] else []
 
         labels: dict = {}
         if d[dbg_use_vlm] and holds:
@@ -913,7 +918,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
         progress(0.85, desc="Rendering mirino…")
         out = Path(tempfile.mkdtemp(prefix="autoedit_dbg_")) / "debug.mp4"
-        pose.debug_video(vpath, out, frames, holds, cts, px, labels)
+        pose.debug_video(vpath, out, frames, holds, cts, px, labels, events=events)
 
         lines = [f"**Frame campionati:** {len(frames)} · persona rilevata in **{seen}**",
                  (f"**Palo:** x={px:.3f} ({pole_src})" if px is not None
@@ -924,6 +929,10 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         if not holds:
             lines.append("_0 fermi: la ballerina si muove sempre o il jitter supera la soglia — "
                          "alza «Soglia fermo» e/o abbassa «Durata minima»._")
+        if events:
+            lines.append(f"**Eventi ({len(events)}):**")
+            for e in events:
+                lines.append(f"- `{e.t:.1f}s` · {e.kind} · {e.part or '—'} · {e.value:.0f}° · {e.label}")
         for k, hd in enumerate(holds):
             lab = labels.get(k, {})
             lines.append(
@@ -933,8 +942,8 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
     dbg_btn.click(
         on_debug,
-        inputs={dbg_video_in, dbg_pole_x, dbg_still, dbg_minhold, dbg_use_vlm, dbg_moves,
-                llm_provider, llm_model, llm_asset_model, llm_base_url, llm_key},
+        inputs={dbg_video_in, dbg_pole_x, dbg_still, dbg_minhold, dbg_events, dbg_use_vlm,
+                dbg_moves, llm_provider, llm_model, llm_asset_model, llm_base_url, llm_key},
         outputs=[dbg_out, dbg_log])
 
     # ---- anteprima ritaglio ----

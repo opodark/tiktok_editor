@@ -3,9 +3,23 @@ import numpy as np
 import pytest
 
 from autoedit.pose import (
-    GRIP_PARTS, IDX, Contact, PoseFrame, _bbox_visible, _motion, _part_xy, _torso_bbox,
-    capabilities, contacts, detect_holds,
+    GRIP_PARTS, IDX, Contact, PoseFrame, _ang, _bbox_visible, _motion, _part_xy, _torso_bbox,
+    body_metrics, capabilities, contacts, detect_events, detect_holds,
 )
+
+
+def _full(shift=0.0, flip=False):
+    """Corpo completo in piedi (flip=True -> a testa in giu')."""
+    base = dict(l_shoulder=(0.45, 0.30), r_shoulder=(0.55, 0.30),
+                l_elbow=(0.40, 0.45), r_elbow=(0.60, 0.45),
+                l_wrist=(0.38, 0.60), r_wrist=(0.62, 0.60),
+                l_hip=(0.46, 0.55), r_hip=(0.54, 0.55),
+                l_knee=(0.46, 0.75), r_knee=(0.54, 0.75),
+                l_ankle=(0.46, 0.95), r_ankle=(0.54, 0.95))
+    if flip:
+        base = {k: (x, 1.0 - y) for k, (x, y) in base.items()}
+    base = {k: (x + shift, y) for k, (x, y) in base.items()}
+    return _lm(**base)
 
 
 def _lm(**pos):
@@ -79,6 +93,39 @@ def test_bbox_visible_none_when_too_few_points():
     b = _bbox_visible(_lm(l_wrist=(0.2, 0.3), r_wrist=(0.8, 0.3),
                           l_ankle=(0.3, 0.9), r_ankle=(0.7, 0.9)))
     assert b == pytest.approx((0.2, 0.3, 0.8, 0.9), abs=1e-5)
+
+
+def test_angle_helper():
+    assert _ang((0, 1, 1), (0, 0, 1), (1, 0, 1)) == pytest.approx(90, abs=0.5)
+    assert _ang((-1, 0, 1), (0, 0, 1), (1, 0, 1)) == pytest.approx(180, abs=0.5)
+
+
+def test_body_metrics_detects_inversion_and_extension():
+    up = body_metrics(_full())
+    assert up["inverted"] is False and abs(up["torso_tilt"]) < 10
+    assert up["braccio sx"] == pytest.approx(180, abs=25)   # arti stesi nel manichino
+
+    down = body_metrics(_full(flip=True))
+    assert down["inverted"] is True
+    assert abs(down["torso_tilt"]) > 150
+
+
+def test_detect_events_finds_invert_run_and_extension_peak():
+    frames = []
+    for i in range(18):
+        if 6 <= i <= 11:                       # 6 frame a testa in giu'
+            lm = _full(flip=True)
+        else:
+            lm = _full()
+            # a i==2 pieghi il braccio sx, poi lo stendi -> picco di estensione a i==3..4
+            if i in (1, 2):
+                lm[IDX["l_wrist"]] = (0.46, 0.44, 1.0)   # gomito piegato
+        frames.append(PoseFrame(t=i * 0.15, lm=lm))
+    ev = detect_events(frames)
+    kinds = {e.kind for e in ev}
+    assert "invert" in kinds
+    inv = [e for e in ev if e.kind == "invert"][0]
+    assert 0.8 < inv.t < 1.8                    # dentro la finestra capovolta
 
 
 def test_capabilities():
