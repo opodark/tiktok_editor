@@ -573,6 +573,13 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
     af_cols, af_rows = 7, 5
     # box di fuoco "smussato": segue con inerzia il target
     fx = [w * 0.5, h * 0.5, w * 0.28, h * 0.28]      # cx, cy, half-w, half-h
+    S = h / 720.0                                    # scala testi in base alla risoluzione
+
+    def txt(img, s, org, scale, color, bold=2):
+        """Testo con contorno nero: leggibile su qualsiasi sfondo."""
+        o = (int(org[0]), int(org[1]))
+        cv2.putText(img, s, o, FT, scale * S, (0, 0, 0), bold + 3, cv2.LINE_AA)
+        cv2.putText(img, s, o, FT, scale * S, color, bold, cv2.LINE_AA)
 
     def bracket(img, cx, cy, hw, hh, col, thick, ln):
         for sx in (-1, 1):
@@ -661,8 +668,8 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
         # --- palo ---
         if px_pole is not None:
             xp = int(px_pole * w)
-            cv2.line(bgr, (xp, m), (xp, h - m), (0, 170, 255), 1, cv2.LINE_AA)
-            cv2.putText(bgr, "POLE", (xp + 8, h // 2), FT, 0.5, (0, 170, 255), 1)
+            cv2.line(bgr, (xp, m), (xp, h - m), (0, 170, 255), 2, cv2.LINE_AA)
+            txt(bgr, "PALO", (xp + 10, h // 2), 0.6, (0, 170, 255))
 
         # --- box di fuoco (staffe che scattano) ---
         locked = hold_now is not None
@@ -686,23 +693,25 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
             e = min(active_ev, key=lambda x: abs(t - x.t))
             ec = EV_COL.get(e.kind, (255, 255, 255))
             tag = (e.label or e.kind.upper()) + (f"  {e.value:.0f}°" if e.value else "")
-            cv2.putText(bgr, tag, (m + 12, m + 44), FT, 0.7, ec, 2, cv2.LINE_AA)
+            txt(bgr, tag, (m + 14, int(m + 74 * S)), 0.95, ec, bold=3)
 
         # --- HUD ---
         tc = f"{int(t // 60):02d}:{int(t % 60):02d}:{int((t * fps) % fps):02d}"
+        rec_y = int(m + 30 * S)
         if blink:
-            cv2.circle(bgr, (m + 14, m + 16), 7, (60, 60, 255), -1)
-        cv2.putText(bgr, f"REC {tc}", (m + 30, m + 22), FT, 0.6, (255, 255, 255), 1)
-        cv2.putText(bgr, "AF-C" if not locked else "AF LOCK", (w - m - 130, m + 22),
-                    FT, 0.6, col, 2)
+            cv2.circle(bgr, (m + 14, rec_y - int(6 * S)), int(8 * S), (60, 60, 255), -1)
+        txt(bgr, f"REC {tc}", (m + int(34 * S), rec_y), 0.7, (255, 255, 255))
+        txt(bgr, "AF-C" if not locked else "AF LOCK",
+            (w - m - int(170 * S), rec_y), 0.7, col, bold=3)
         lab = labels.get(hold_now, {}) if hold_now is not None else {}
         part_txt = PART_IT.get(holds[hold_now].focus_part, "?") if hold_now is not None else "--"
         grip_txt = lab.get("grip") or part_txt
-        move_txt = lab.get("move") or ("POSE" if pf and pf.lm is not None else "no soggetto")
-        cv2.putText(bgr, f"FOCUS: {grip_txt}", (m + 10, h - m - 14), FT, 0.6, col, 2)
-        cv2.putText(bgr, move_txt.upper(), (w // 2 - 70, h - m - 14), FT, 0.55, (255, 255, 255), 1)
+        move_txt = lab.get("move") or ("POSE" if pf and pf.lm is not None else "NESSUN SOGGETTO")
+        base_y = h - m - int(16 * S)
+        txt(bgr, f"FOCUS: {grip_txt}", (m + 12, base_y), 0.8, col, bold=3)
+        txt(bgr, move_txt.upper(), (w // 2 - int(90 * S), base_y), 0.7, (255, 255, 255))
         if locked and blink:
-            cv2.putText(bgr, "[ FOCUS LOCK ]", (w // 2 - 95, m + 46), FT, 0.6, GREEN, 2)
+            txt(bgr, "[ FOCUS LOCK ]", (w // 2 - int(110 * S), int(m + 78 * S)), 0.8, GREEN, bold=3)
 
         # --- timeline dei fermi ---
         y = h - m + 8
