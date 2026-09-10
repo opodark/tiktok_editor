@@ -43,3 +43,6 @@ desktop.ini
 .idea/
 .vscode/
 *.swp
+
+# --- modelli MediaPipe (scaricati al primo uso, ~17MB) ---
+autoedit/assets_data/models/

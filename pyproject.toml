@@ -30,6 +30,7 @@ dependencies = [
 gui = ["gradio>=4.0"]
 ai = ["openai>=1.40", "anthropic>=0.40"]
 svg = ["cairosvg>=2.7"]                       # rasterizza SVG grezzo (alternativa: binario 'resvg' sul PATH)
+pose = ["mediapipe>=1.0", "opencv-python-headless>=4.9"]  # analisi pose per i tutorial (no torch)
 all = ["gradio>=4.0", "openai>=1.40", "anthropic>=0.40", "cairosvg>=2.7"]
 dev = ["pytest>=8"]
 

@@ -33,6 +33,7 @@ class LLMConfig:
     model: str = ""              # es. "qwen2.5:7b", "hf.co/utente/repo:Q4_K_M", "claude-sonnet-5"
     asset_model: str = ""        # modello per la grafica generata (vuoto = usa `model`);
                                  # un modello "coder" fa SVG piu' puliti
+    vision_model: str = ""       # modello multimodale per l'analisi pose (vuoto = qwen2.5vl:7b)
     api_key: str = ""
     timeout: float = 180.0        # i modelli locali possono essere lenti
 
