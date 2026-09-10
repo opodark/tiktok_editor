@@ -581,12 +581,28 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
         cv2.putText(img, s, o, FT, scale * S, (0, 0, 0), bold + 3, cv2.LINE_AA)
         cv2.putText(img, s, o, FT, scale * S, color, bold, cv2.LINE_AA)
 
+    # spessori scalati sulla risoluzione: reggono crop e ricompressione social
+    TH = max(2, round(3 * S))            # linee principali (scheletro, palo, staffe)
+    TF = max(1, round(2 * S))            # linee fini (griglia, terzi)
+    DOT = max(6, round(11 * S))          # raggio pallini presa
+
+    def line(img, p1, p2, col, thick):
+        cv2.line(img, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])),
+                 (0, 0, 0), thick + max(2, round(2 * S)), cv2.LINE_AA)   # alone nero
+        cv2.line(img, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])),
+                 col, thick, cv2.LINE_AA)
+
+    def dot(img, c, r, col, filled=True):
+        cv2.circle(img, (int(c[0]), int(c[1])), r + max(2, round(2 * S)), (0, 0, 0),
+                   -1 if filled else max(2, round(2 * S)), cv2.LINE_AA)
+        cv2.circle(img, (int(c[0]), int(c[1])), r, col, -1 if filled else TH, cv2.LINE_AA)
+
     def bracket(img, cx, cy, hw, hh, col, thick, ln):
         for sx in (-1, 1):
             for sy in (-1, 1):
                 x, y = int(cx + sx * hw), int(cy + sy * hh)
-                cv2.line(img, (x, y), (int(x - sx * ln), y), col, thick)
-                cv2.line(img, (x, y), (x, int(y - sy * ln)), col, thick)
+                line(img, (x, y), (x - sx * ln, y), col, thick)
+                line(img, (x, y), (x, y - sy * ln), col, thick)
 
     i = i0
     while i <= i1:
@@ -609,16 +625,18 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
         cv2.rectangle(ov, (w - m, 0), (w, h), (0, 0, 0), -1)
         cv2.addWeighted(ov, 0.45, bgr, 0.55, 0, bgr)
         for gx in (w // 3, 2 * w // 3):
-            cv2.line(bgr, (gx, m), (gx, h - m), (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.line(bgr, (gx, m), (gx, h - m), (255, 255, 255), TF, cv2.LINE_AA)
         for gy in (m + (h - 2 * m) // 3, m + 2 * (h - 2 * m) // 3):
-            cv2.line(bgr, (m, gy), (w - m, gy), (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.line(bgr, (m, gy), (w - m, gy), (255, 255, 255), TF, cv2.LINE_AA)
+        cl = int(34 * S)
         for sx in (m, w - m):
             for sy in (m, h - m):
-                dx = 26 if sx == m else -26
-                dy = 26 if sy == m else -26
-                cv2.line(bgr, (sx, sy), (sx + dx, sy), (255, 255, 255), 2)
-                cv2.line(bgr, (sx, sy), (sx, sy + dy), (255, 255, 255), 2)
-        cv2.drawMarker(bgr, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 22, 1)
+                dx = cl if sx == m else -cl
+                dy = cl if sy == m else -cl
+                line(bgr, (sx, sy), (sx + dx, sy), (255, 255, 255), TH)
+                line(bgr, (sx, sy), (sx, sy + dy), (255, 255, 255), TH)
+        cv2.drawMarker(bgr, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS,
+                       int(28 * S), TF)
 
         # --- target del fuoco: bbox del fermo, o della presa, o del corpo ---
         tgt = None
@@ -645,40 +663,40 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
                 py = int(m + (h - 2 * m) * (r + 0.5) / af_rows)
                 inside = (fx[0] - fx[2] < px < fx[0] + fx[2] and
                           fx[1] - fx[3] < py < fx[1] + fx[3])
-                col = GREEN if (inside and (hold_now is not None or blink)) else (150, 150, 150)
-                s = 7 if inside else 4
+                col = GREEN if (inside and (hold_now is not None or blink)) else (170, 170, 170)
+                s = int((10 if inside else 6) * S)
+                cv2.rectangle(bgr, (px - s, py - s), (px + s, py + s), (0, 0, 0), TH + TF)
                 cv2.rectangle(bgr, (px - s, py - s), (px + s, py + s), col,
-                              2 if inside else 1)
+                              TH if inside else TF)
 
-        # --- scheletro tenue + contatti ---
+        # --- scheletro + contatti ---
         if pf is not None and pf.lm is not None:
             L = pf.lm
             for a, b in _SKELETON:
                 pa, pb = L[IDX[a]], L[IDX[b]]
                 if pa[2] > 0.3 and pb[2] > 0.3:
-                    cv2.line(bgr, (int(pa[0] * w), int(pa[1] * h)),
-                             (int(pb[0] * w), int(pb[1] * h)), DIM, 1, cv2.LINE_AA)
+                    line(bgr, (pa[0] * w, pa[1] * h), (pb[0] * w, pb[1] * h),
+                         (230, 245, 235), TH)
             for part, names in GRIP_PARTS.items():
                 xy = _part_xy(L, names, 0.3)
                 if xy:
                     on = px_pole is not None and abs(xy[0] - px_pole) < 0.09
-                    cv2.circle(bgr, (int(xy[0] * w), int(xy[1] * h)), 8,
-                               GREEN if on else AMBER, -1 if on else 2)
+                    dot(bgr, (xy[0] * w, xy[1] * h), DOT, GREEN if on else AMBER, filled=on)
 
         # --- palo ---
         if px_pole is not None:
             xp = int(px_pole * w)
-            cv2.line(bgr, (xp, m), (xp, h - m), (0, 170, 255), 2, cv2.LINE_AA)
-            txt(bgr, "PALO", (xp + 10, h // 2), 0.6, (0, 170, 255))
+            line(bgr, (xp, m), (xp, h - m), (0, 170, 255), TH + TF)
+            txt(bgr, "PALO", (xp + int(12 * S), h // 2), 0.7, (0, 170, 255), bold=3)
 
         # --- box di fuoco (staffe che scattano) ---
         locked = hold_now is not None
         col = GREEN if locked else AMBER
-        bracket(bgr, fx[0], fx[1], fx[2], fx[3], col, 3 if locked else 2,
+        bracket(bgr, fx[0], fx[1], fx[2], fx[3], col, TH + (TF if locked else 0),
                 int(min(fx[2], fx[3]) * 0.4))
         if locked and blink:
             cv2.rectangle(bgr, (int(fx[0] - fx[2]), int(fx[1] - fx[3])),
-                          (int(fx[0] + fx[2]), int(fx[1] + fx[3])), GREEN, 1)
+                          (int(fx[0] + fx[2]), int(fx[1] + fx[3])), GREEN, TF)
 
         # --- eventi scenici: inversione / estensione massima ---
         active_ev = [e for e in events if -0.2 <= t - e.t <= 0.55]
@@ -687,8 +705,9 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
             ec = EV_COL.get(e.kind, (255, 255, 255))
             ex, ey = int(e.xy[0] * w), int(e.xy[1] * h)
             rad = int(16 + max(0.0, d) * 240)                   # anello che si espande e sfuma
-            cv2.circle(bgr, (ex, ey), rad, ec, 2, cv2.LINE_AA)
-            cv2.drawMarker(bgr, (ex, ey), ec, cv2.MARKER_TILTED_CROSS, 22, 2)
+            cv2.circle(bgr, (ex, ey), rad, (0, 0, 0), TH + TF + 2, cv2.LINE_AA)
+            cv2.circle(bgr, (ex, ey), rad, ec, TH + 1, cv2.LINE_AA)
+            cv2.drawMarker(bgr, (ex, ey), ec, cv2.MARKER_TILTED_CROSS, int(28 * S), TH)
         if active_ev:                                           # un solo tag per volta, in alto
             e = min(active_ev, key=lambda x: abs(t - x.t))
             ec = EV_COL.get(e.kind, (255, 255, 255))
@@ -714,18 +733,19 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
             txt(bgr, "[ FOCUS LOCK ]", (w // 2 - int(110 * S), int(m + 78 * S)), 0.8, GREEN, bold=3)
 
         # --- timeline dei fermi ---
-        y = h - m + 8
-        cv2.line(bgr, (m, y), (w - m, y), (90, 90, 90), 2)
+        y = int(h - m + 10 * S)
+        cv2.line(bgr, (m, y), (w - m, y), (0, 0, 0), int(10 * S))
+        cv2.line(bgr, (m, y), (w - m, y), (110, 110, 110), TH)
         for hd in holds:
             x0 = int(m + hd.t0 / dur * (w - 2 * m))
             x1 = int(m + hd.t1 / dur * (w - 2 * m))
-            cv2.line(bgr, (x0, y), (x1, y), GREEN, 6)
+            cv2.line(bgr, (x0, y), (x1, y), GREEN, int(9 * S))
         for e in events:
             ex = int(m + e.t / dur * (w - 2 * m))
             cv2.drawMarker(bgr, (ex, y), EV_COL.get(e.kind, (255, 255, 255)),
-                           cv2.MARKER_DIAMOND, 12, 2)
+                           cv2.MARKER_DIAMOND, int(16 * S), TH)
         cv2.drawMarker(bgr, (int(m + t / dur * (w - 2 * m)), y), (255, 255, 255),
-                       cv2.MARKER_TRIANGLE_DOWN, 12, 2)
+                       cv2.MARKER_TRIANGLE_DOWN, int(18 * S), TH)
 
         vw.write(bgr)
     cap.release()
