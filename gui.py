@@ -634,13 +634,14 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                 gr.Markdown(
                     "<div class='hint'>Guardi la clip attraverso un mirino da reflex: le staffe "
                     "AF scattano su ciò che l'IA riconosce (busto / presa), con palo, scheletro, "
-                    "timeline dei «fermi» e HUD. Serve per capire cosa sta capendo l'IA.</div>")
-                dbg_video_in = gr.Video(label="Clip da analizzare")
+                    "timeline dei «fermi» e HUD. Serve per capire cosa sta capendo l'IA.<br>"
+                    "<b>Niente upload</b>: incolla il percorso del file sul disco (l'anteprima video "
+                    "di Gradio su Windows dà spesso «errore»). Il file viene letto direttamente da lì.</div>")
                 dbg_video_path = gr.Textbox(
-                    label="…oppure incolla il percorso del file (se l'upload dà «errore video»)",
-                    placeholder=r"D:\video\allenamento_palo.mp4",
-                    info="Il file deve essere già esportato e chiuso dall'editor. "
-                         "Meglio se in una cartella normale (Desktop, Video), non in Temp.")
+                    label="Percorso del video da analizzare",
+                    placeholder=r"C:\Users\opoda\Downloads\Video Project 12.mp4",
+                    info="Copia il percorso completo (in Esplora file: Shift+click destro → «Copia "
+                         "come percorso»). Con o senza virgolette.")
                 with gr.Row():
                     dbg_pole_x = gr.Slider(0.0, 1.0, value=0.0, step=0.01,
                                            label="Palo — x manuale (0 = auto)",
@@ -879,9 +880,9 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
     # ---- DEBUG: vista mirino IA ----
     def on_debug(d, progress=gr.Progress()):
-        video = (d[dbg_video_path] or "").strip().strip('"') or d[dbg_video_in]
+        video = (d[dbg_video_path] or "").strip().strip('"').strip("'")
         if not video:
-            raise gr.Error("Carica una clip (o incolla il percorso) nella sezione DEBUG.")
+            raise gr.Error("Incolla il percorso del video nel campo «Percorso del video da analizzare».")
         try:
             from autoedit import pose, vision
         except Exception as e:  # noqa: BLE001
@@ -952,7 +953,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
     dbg_btn.click(
         on_debug,
-        inputs={dbg_video_in, dbg_video_path, dbg_pole_x, dbg_still, dbg_minhold, dbg_events,
+        inputs={dbg_video_path, dbg_pole_x, dbg_still, dbg_minhold, dbg_events,
                 dbg_use_vlm, dbg_moves, llm_provider, llm_model, llm_asset_model,
                 llm_base_url, llm_key},
         outputs=[dbg_out, dbg_log])
