@@ -643,6 +643,12 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                     info="Copia il percorso completo (in Esplora file: Shift+click destro → «Copia "
                          "come percorso»). Con o senza virgolette.")
                 with gr.Row():
+                    dbg_t0 = gr.Number(value=0.0, label="Da (s)",
+                                       info="Analizza solo questa finestra: una clip lunga in "
+                                            "1080p è pesantissima da renderizzare tutta.")
+                    dbg_t1 = gr.Number(value=30.0, label="A (s)",
+                                       info="0 o vuoto = fino alla fine (sconsigliato oltre ~60s).")
+                with gr.Row():
                     dbg_pole_x = gr.Slider(0.0, 1.0, value=0.0, step=0.01,
                                            label="Palo — x manuale (0 = auto)",
                                            info="Se l'auto non lo trova: metti dove sta il palo "
@@ -897,8 +903,14 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         except Exception as e:  # noqa: BLE001
             raise gr.Error(f"Il file è bloccato da un altro programma ({e}). "
                            "Chiudi l'editor / attendi la fine dell'export, o copialo altrove.")
+        t0 = max(0.0, float(d[dbg_t0] or 0.0))
+        t1 = float(d[dbg_t1] or 0.0) or None
+        if t1 and t1 <= t0:
+            raise gr.Error("«A (s)» deve essere maggiore di «Da (s)».")
         progress(0.1, desc="Analisi pose (MediaPipe)…")
-        frames = pose.analyze_video(vpath, fps_sample=8)
+        frames = pose.analyze_video(vpath, fps_sample=8, t_start=t0, t_end=t1)
+        if not frames:
+            raise gr.Error("Nessun fotogramma nella finestra scelta — controlla «Da/A (s)».")
         seen = sum(1 for f in frames if f.lm is not None)
         manual = float(d[dbg_pole_x] or 0.0)
         if manual > 0.0:
@@ -929,7 +941,8 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
         progress(0.85, desc="Rendering mirino…")
         out = Path(tempfile.mkdtemp(prefix="autoedit_dbg_")) / "debug.mp4"
-        pose.debug_video(vpath, out, frames, holds, cts, px, labels, events=events)
+        pose.debug_video(vpath, out, frames, holds, cts, px, labels, events=events,
+                         t_start=t0, t_end=t1)
 
         lines = [f"**Frame campionati:** {len(frames)} · persona rilevata in **{seen}**",
                  (f"**Palo:** x={px:.3f} ({pole_src})" if px is not None
@@ -953,7 +966,7 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
     dbg_btn.click(
         on_debug,
-        inputs={dbg_video_path, dbg_pole_x, dbg_still, dbg_minhold, dbg_events,
+        inputs={dbg_video_path, dbg_t0, dbg_t1, dbg_pole_x, dbg_still, dbg_minhold, dbg_events,
                 dbg_use_vlm, dbg_moves, llm_provider, llm_model, llm_asset_model,
                 llm_base_url, llm_key},
         outputs=[dbg_out, dbg_log])

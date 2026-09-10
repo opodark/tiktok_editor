@@ -105,8 +105,10 @@ class PoseEvent:
 
 
 # --------------------------------------------------------------------------
-def analyze_video(path: Path | str, fps_sample: float = 8.0, max_people: int = 1) -> list[PoseFrame]:
-    """Campiona il video a ~`fps_sample` e ritorna i keypoint per frame."""
+def analyze_video(path: Path | str, fps_sample: float = 8.0, max_people: int = 1,
+                  t_start: float = 0.0, t_end: Optional[float] = None) -> list[PoseFrame]:
+    """Campiona il video a ~`fps_sample` e ritorna i keypoint per frame.
+    Se dati, analizza solo la finestra [t_start, t_end] secondi."""
     import cv2  # noqa: PLC0415
     import mediapipe as mp  # noqa: PLC0415
     from mediapipe.tasks.python.core.base_options import BaseOptions
@@ -125,15 +127,19 @@ def analyze_video(path: Path | str, fps_sample: float = 8.0, max_people: int = 1
         raise RuntimeError(f"Impossibile aprire il video: {path}")
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(round(src_fps / max(1.0, fps_sample))))
+    i0 = int(max(0.0, t_start) * src_fps)
+    i1 = int(t_end * src_fps) if t_end else 1 << 62
+    if i0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i0)
 
     frames: list[PoseFrame] = []
     with PoseLandmarker.create_from_options(opts) as lm:
-        i = 0
-        while True:
+        i = i0
+        while i <= i1:
             ok, bgr = cap.read()
             if not ok:
                 break
-            if i % step == 0:
+            if (i - i0) % step == 0:
                 t = i / src_fps
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 res = lm.detect_for_video(
@@ -522,22 +528,33 @@ def _torso_bbox(lm: np.ndarray):
 def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
                 holds: list[Hold], cts: list[Contact], px_pole: Optional[float],
                 labels: Optional[dict] = None, events: Optional[list] = None,
-                transcode: bool = True) -> Path:
+                t_start: float = 0.0, t_end: Optional[float] = None,
+                max_w: int = 1280, transcode: bool = True) -> Path:
     """Video DEBUG: guardi attraverso un mirino da reflex e vedi DOVE
     l'IA sta mettendo il fuoco (staffe AF che scattano sulla presa /
     sul soggetto), la griglia dei punti AF, il palo, lo scheletro, e un
     HUD con parte in focus / nome mossa / FOCUS LOCK sui fermi.
 
+    Renderizza solo [t_start, t_end] e riscala a `max_w` di larghezza
+    (una clip lunga in 1080p e' pesantissima da disegnare frame per frame).
     `labels` = {indice_hold: {"move": str, "grip": str}} da vision.py.
     """
     import cv2  # noqa: PLC0415
 
     cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Impossibile aprire il video: {path}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    sw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    sh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     dur = total / fps if total else (frames[-1].t if frames else 1.0)
+    scale = min(1.0, max_w / sw) if sw else 1.0
+    w, h = int(sw * scale), int(sh * scale)
+    i0 = int(max(0.0, t_start) * fps)
+    i1 = int(t_end * fps) if t_end else (total or 1 << 62)
+    if i0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i0)
     by_t = sorted(frames, key=lambda f: f.t)
     labels = labels or {}
     events = events or []
@@ -546,6 +563,9 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
 
     raw = Path(out_path).with_suffix(".raw.mp4") if transcode else Path(out_path)
     vw = cv2.VideoWriter(str(raw), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    if not vw.isOpened():
+        cap.release()
+        raise RuntimeError("cv2.VideoWriter non si apre (codec mp4v mancante?).")
 
     GREEN, AMBER, DIM = (90, 255, 120), (60, 200, 255), (120, 150, 120)
     FT = cv2.FONT_HERSHEY_DUPLEX
@@ -561,12 +581,15 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
                 cv2.line(img, (x, y), (int(x - sx * ln), y), col, thick)
                 cv2.line(img, (x, y), (x, int(y - sy * ln)), col, thick)
 
-    i = 0
-    while True:
+    i = i0
+    while i <= i1:
         ok, bgr = cap.read()
         if not ok:
             break
-        t = i / fps
+        i += 1
+        if scale < 1.0:
+            bgr = cv2.resize(bgr, (w, h), interpolation=cv2.INTER_AREA)
+        t = (i - 1) / fps
         pf = min(by_t, key=lambda f: abs(f.t - t)) if by_t else None
         hold_now = next((k for k, hd in enumerate(holds) if hd.t0 <= t <= hd.t1), None)
         blink = (i // max(1, int(fps * 0.35))) % 2 == 0
@@ -696,7 +719,6 @@ def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
                        cv2.MARKER_TRIANGLE_DOWN, 12, 2)
 
         vw.write(bgr)
-        i += 1
     cap.release()
     vw.release()
 
@@ -741,9 +763,13 @@ if __name__ == "__main__":
     ap.add_argument("--out", type=Path, default=Path("pose_preview.mp4"))
     ap.add_argument("--fps", type=float, default=8.0)
     ap.add_argument("--people", type=int, default=1)
+    ap.add_argument("--from", dest="t0", type=float, default=0.0)
+    ap.add_argument("--to", dest="t1", type=float, default=0.0)
     a = ap.parse_args()
+    t1 = a.t1 or None
 
-    frames = analyze_video(a.video, fps_sample=a.fps, max_people=a.people)
+    frames = analyze_video(a.video, fps_sample=a.fps, max_people=a.people,
+                           t_start=a.t0, t_end=t1)
     seen = sum(1 for f in frames if f.lm is not None)
     px, src = pole_x_auto(a.video, frames)
     cts = contacts(frames, px)
@@ -761,5 +787,5 @@ if __name__ == "__main__":
     print(f"eventi ({len(events)}):")
     for e in events:
         print(f"  {e.t:5.2f}s  {e.kind:9s} {e.part:12s} {e.value:6.1f}  {e.label}")
-    debug_video(a.video, a.out, frames, holds, cts, px, events=events)
+    debug_video(a.video, a.out, frames, holds, cts, px, events=events, t_start=a.t0, t_end=t1)
     print(f"anteprima -> {a.out}")
