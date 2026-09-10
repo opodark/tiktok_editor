@@ -149,26 +149,55 @@ def pole_x(path: Path | str, probe_frames: int = 12) -> Optional[float]:
         cap.release()
         return None
     xs: list[float] = []
-    for f in np.linspace(total * 0.1, total * 0.9, probe_frames).astype(int):
+    for f in np.linspace(total * 0.08, total * 0.92, probe_frames).astype(int):
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(f))
         ok, bgr = cap.read()
         if not ok:
             continue
         h, w = bgr.shape[:2]
-        edges = cv2.Canny(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), 60, 180)
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=120,
-                                minLineLength=int(h * 0.45), maxLineGap=25)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 40, 140)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80,
+                                minLineLength=int(h * 0.35), maxLineGap=40)
         if lines is None:
             continue
         cand = []
         for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
             ang = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
-            if ang > 78:                                 # quasi verticale
+            if ang > 74:                                 # quasi verticale
                 cand.append((x1 + x2) / 2.0 / w)
         if cand:
             xs.append(float(np.median(cand)))
     cap.release()
-    return float(np.median(xs)) if xs else None
+    if len(xs) < max(2, probe_frames // 4):              # troppo poche linee -> non fidarsi
+        return None
+    xs = np.array(xs)
+    # tieni il gruppo piu' coerente (il palo e' fermo, il resto e' rumore)
+    med = float(np.median(xs))
+    keep = xs[np.abs(xs - med) < 0.06]
+    return float(np.median(keep)) if len(keep) >= 2 else None
+
+
+def pole_x_from_pose(frames: list[PoseFrame]) -> Optional[float]:
+    """Stima il palo DAL corpo: nel pole la presa (polsi/caviglie) sta
+    quasi sempre incolonnata su una x. Utile quando Hough fallisce
+    (palo cromato, sfondo confuso, angolo di camera)."""
+    xs: list[float] = []
+    for pf in frames:
+        if pf.lm is None:
+            continue
+        for n in ("l_wrist", "r_wrist", "l_ankle", "r_ankle"):
+            k = pf.lm[IDX[n]]
+            if k[2] >= 0.5:
+                xs.append(float(k[0]))
+    if len(xs) < 8:
+        return None
+    xs = np.array(xs)
+    # moda robusta: centro della finestra 0.12 piu' popolata
+    grid = np.linspace(0.1, 0.9, 33)
+    best = grid[np.argmax([np.sum(np.abs(xs - g) < 0.06) for g in grid])]
+    inl = xs[np.abs(xs - best) < 0.06]
+    return float(np.median(inl)) if len(inl) >= 6 else None
 
 
 def _part_xy(lm: np.ndarray, names, vis_min: float = 0.4):
@@ -224,15 +253,30 @@ def _motion(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> float:
     return float(np.mean(np.linalg.norm(a[m, :2] - b[m, :2], axis=1)))
 
 
+def _smooth(frames: list[PoseFrame], k: int = 2) -> list[np.ndarray | None]:
+    """Mediana mobile sui keypoint: toglie il jitter di MediaPipe che
+    altrimenti fa sembrare 'in movimento' anche una posa ferma."""
+    out: list[np.ndarray | None] = []
+    for i, pf in enumerate(frames):
+        if pf.lm is None:
+            out.append(None)
+            continue
+        win = [f.lm for f in frames[max(0, i - k): i + k + 1] if f.lm is not None]
+        out.append(np.median(np.stack(win), axis=0) if len(win) >= 2 else pf.lm)
+    return out
+
+
 def detect_holds(frames: list[PoseFrame], cts: list[Contact],
-                 still: float = 0.012, min_hold: float = 0.45) -> list[Hold]:
+                 still: float = 0.02, min_hold: float = 0.35) -> list[Hold]:
     """Tratti fermi (movimento medio dei keypoint < `still`) lunghi almeno
-    `min_hold` s. Il FOCUS e' il contatto iniziato piu' di recente."""
+    `min_hold` s. Il FOCUS e' il contatto iniziato piu' di recente.
+    I keypoint vengono prima lisciati per togliere il jitter."""
+    sm = _smooth(frames)
     holds: list[Hold] = []
     run_start = None
     lowest = (1e9, 0.0)
     for i in range(1, len(frames)):
-        mv = _motion(frames[i - 1].lm, frames[i].lm)
+        mv = _motion(sm[i - 1], sm[i])
         t = frames[i].t
         if mv < still and frames[i].lm is not None:
             if run_start is None:
@@ -544,11 +588,15 @@ if __name__ == "__main__":
     frames = analyze_video(a.video, fps_sample=a.fps, max_people=a.people)
     seen = sum(1 for f in frames if f.lm is not None)
     px = pole_x(a.video)
+    src = "Hough"
+    if px is None:
+        px = pole_x_from_pose(frames)
+        src = "dai keypoint" if px is not None else "-"
     cts = contacts(frames, px)
     holds = detect_holds(frames, cts)
 
     print(f"frame campionati: {len(frames)}  (persona rilevata in {seen})")
-    print(f"palo: x={px:.3f}" if px is not None else "palo: non trovato")
+    print(f"palo: x={px:.3f}  ({src})" if px is not None else "palo: non trovato")
     print(f"contatti ({len(cts)}):")
     for c in cts:
         print(f"  {PART_IT.get(c.part, c.part):8s} {c.t0:5.2f}-{c.t1:5.2f}s  ({c.dur:.2f}s)")

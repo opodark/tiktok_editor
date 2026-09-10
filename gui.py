@@ -637,6 +637,17 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                     "timeline dei «fermi» e HUD. Serve per capire cosa sta capendo l'IA.</div>")
                 dbg_video_in = gr.Video(label="Clip da analizzare")
                 with gr.Row():
+                    dbg_pole_x = gr.Slider(0.0, 1.0, value=0.0, step=0.01,
+                                           label="Palo — x manuale (0 = auto)",
+                                           info="Se l'auto non lo trova: metti dove sta il palo "
+                                                "in orizzontale (0=sx, 0.5=centro, 1=dx).")
+                    dbg_still = gr.Slider(0.005, 0.06, value=0.02, step=0.005,
+                                          label="Soglia «fermo»",
+                                          info="Più alta = più tollerante (trova più fermi). "
+                                               "Alza se la ballerina si muove sempre.")
+                    dbg_minhold = gr.Slider(0.2, 1.5, value=0.35, step=0.05,
+                                            label="Durata minima fermo (s)")
+                with gr.Row():
                     dbg_use_vlm = gr.Checkbox(
                         value=False, label="Usa anche il modello visione sui fermi",
                         info="Nomina la mossa + la presa su ogni fermo. Più lento (~6s/fermo).")
@@ -870,9 +881,18 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         progress(0.1, desc="Analisi pose (MediaPipe)…")
         frames = pose.analyze_video(vpath, fps_sample=8)
         seen = sum(1 for f in frames if f.lm is not None)
-        px = pose.pole_x(vpath)
+        manual = float(d[dbg_pole_x] or 0.0)
+        if manual > 0.0:
+            px, pole_src = manual, "manuale"
+        else:
+            px = pose.pole_x(vpath)
+            pole_src = "Hough"
+            if px is None:
+                px = pose.pole_x_from_pose(frames)
+                pole_src = "dai keypoint" if px is not None else "non trovato"
         cts = pose.contacts(frames, px)
-        holds = pose.detect_holds(frames, cts)
+        holds = pose.detect_holds(frames, cts, still=float(d[dbg_still]),
+                                  min_hold=float(d[dbg_minhold]))
 
         labels: dict = {}
         if d[dbg_use_vlm] and holds:
@@ -896,8 +916,14 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
         pose.debug_video(vpath, out, frames, holds, cts, px, labels)
 
         lines = [f"**Frame campionati:** {len(frames)} · persona rilevata in **{seen}**",
-                 (f"**Palo:** x={px:.3f}" if px is not None else "**Palo:** non trovato"),
+                 (f"**Palo:** x={px:.3f} ({pole_src})" if px is not None
+                  else "**Palo:** non trovato — mettilo a mano con lo slider «Palo — x manuale»"),
                  f"**Contatti:** {len(cts)} · **Fermi:** {len(holds)}"]
+        if px is None:
+            lines.append("_Senza palo non ci sono contatti/prese: le staffe AF seguono solo il busto._")
+        if not holds:
+            lines.append("_0 fermi: la ballerina si muove sempre o il jitter supera la soglia — "
+                         "alza «Soglia fermo» e/o abbassa «Durata minima»._")
         for k, hd in enumerate(holds):
             lab = labels.get(k, {})
             lines.append(
@@ -907,8 +933,8 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
 
     dbg_btn.click(
         on_debug,
-        inputs={dbg_video_in, dbg_use_vlm, dbg_moves, llm_provider, llm_model,
-                llm_asset_model, llm_base_url, llm_key},
+        inputs={dbg_video_in, dbg_pole_x, dbg_still, dbg_minhold, dbg_use_vlm, dbg_moves,
+                llm_provider, llm_model, llm_asset_model, llm_base_url, llm_key},
         outputs=[dbg_out, dbg_log])
 
     # ---- anteprima ritaglio ----

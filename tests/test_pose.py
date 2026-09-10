@@ -46,11 +46,12 @@ def test_detect_holds_splits_on_motion():
                 r_hip=(0.58, 0.6), l_knee=(0.42, 0.8), r_knee=(0.58, 0.8),
                 l_ankle=(0.42, 0.95), r_ankle=(0.58, 0.95))
     frames = []
-    for i in range(20):
-        shift = 0.0 if i < 8 or i > 12 else (i - 8) * 0.05   # movimento a meta'
+    for i in range(24):
+        # posa A (0-8), transizione A->B (9-13), posa B ferma (14-23)
+        shift = 0.0 if i <= 8 else (0.5 if i >= 14 else (i - 8) / 6 * 0.5)
         b = {k: (x + shift, y) for k, (x, y) in body.items()}
         frames.append(PoseFrame(t=i * 0.15, lm=_lm(**b)))
-    holds = detect_holds(frames, [], still=0.012, min_hold=0.3)
+    holds = detect_holds(frames, [], still=0.015, min_hold=0.3)
     assert len(holds) == 2
     assert holds[0].t1 <= holds[1].t0
 
