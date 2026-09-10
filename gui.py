@@ -630,6 +630,23 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                 keep_temp = gr.Checkbox(value=False, label="Tieni i file temporanei",
                                         info="Per debug: non cancella la cartella di lavoro.")
 
+            with gr.Accordion("🐞 DEBUG — vista mirino IA", open=True):
+                gr.Markdown(
+                    "<div class='hint'>Guardi la clip attraverso un mirino da reflex: le staffe "
+                    "AF scattano su ciò che l'IA riconosce (busto / presa), con palo, scheletro, "
+                    "timeline dei «fermi» e HUD. Serve per capire cosa sta capendo l'IA.</div>")
+                dbg_video_in = gr.Video(label="Clip da analizzare")
+                with gr.Row():
+                    dbg_use_vlm = gr.Checkbox(
+                        value=False, label="Usa anche il modello visione sui fermi",
+                        info="Nomina la mossa + la presa su ogni fermo. Più lento (~6s/fermo).")
+                    dbg_moves = gr.Textbox(
+                        label="Lista mosse per name_pose (una per riga)", lines=2,
+                        placeholder="Basic invert\nSuperman\nGemini\nAyesha…")
+                dbg_btn = gr.Button("🐞  GENERA VIDEO DEBUG", variant="stop", size="lg")
+                dbg_out = gr.Video(label="Video mirino")
+                dbg_log = gr.Markdown()
+
     # ---------------------------------------------------------------------
     # Wiring
     # ---------------------------------------------------------------------
@@ -839,6 +856,60 @@ with gr.Blocks(title="autoedit — montaggio automatico") as demo:
                 asset_start, asset_dur, asset_queue],
         outputs=[asset_queue, asset_queue_md])
     asset_clear_btn.click(on_asset_clear, outputs=[asset_queue, asset_queue_md])
+
+    # ---- DEBUG: vista mirino IA ----
+    def on_debug(d, progress=gr.Progress()):
+        video = d[dbg_video_in]
+        if not video:
+            raise gr.Error("Carica una clip nella sezione DEBUG.")
+        try:
+            from autoedit import pose, vision
+        except Exception as e:  # noqa: BLE001
+            raise gr.Error(f"Manca una dipendenza: {e}. Installa:  pip install \"autoedit[pose]\"")
+        vpath = _as_path(video)
+        progress(0.1, desc="Analisi pose (MediaPipe)…")
+        frames = pose.analyze_video(vpath, fps_sample=8)
+        seen = sum(1 for f in frames if f.lm is not None)
+        px = pose.pole_x(vpath)
+        cts = pose.contacts(frames, px)
+        holds = pose.detect_holds(frames, cts)
+
+        labels: dict = {}
+        if d[dbg_use_vlm] and holds:
+            moves = [m.strip() for m in (d[dbg_moves] or "").splitlines() if m.strip()]
+            cfg = _llm_cfg(d)
+            tmpd = Path(tempfile.mkdtemp(prefix="autoedit_dbgf_"))
+            for k, hd in enumerate(holds):
+                progress(0.25 + 0.55 * k / len(holds), desc=f"Modello visione · fermo {k + 1}/{len(holds)}")
+                fp = tmpd / f"h{k}.png"
+                try:
+                    pose.save_frame(vpath, hd.focus_t, fp)
+                    gp = vision.grip_part(cfg, fp)
+                    nm = vision.name_pose(cfg, fp, moves)
+                    labels[k] = {"grip": gp.get("load_bearing") or ", ".join(gp.get("parts") or []) or "?",
+                                 "move": nm.get("move", "")}
+                except Exception as e:  # noqa: BLE001
+                    labels[k] = {"grip": f"err: {e}", "move": ""}
+
+        progress(0.85, desc="Rendering mirino…")
+        out = Path(tempfile.mkdtemp(prefix="autoedit_dbg_")) / "debug.mp4"
+        pose.debug_video(vpath, out, frames, holds, cts, px, labels)
+
+        lines = [f"**Frame campionati:** {len(frames)} · persona rilevata in **{seen}**",
+                 (f"**Palo:** x={px:.3f}" if px is not None else "**Palo:** non trovato"),
+                 f"**Contatti:** {len(cts)} · **Fermi:** {len(holds)}"]
+        for k, hd in enumerate(holds):
+            lab = labels.get(k, {})
+            lines.append(
+                f"- fermo `{hd.t0:.1f}–{hd.t1:.1f}s` · focus@{hd.focus_t:.1f}s · "
+                f"presa: {lab.get('grip') or hd.focus_part or '—'} · mossa: {lab.get('move') or '—'}")
+        return str(out), "\n".join(lines)
+
+    dbg_btn.click(
+        on_debug,
+        inputs={dbg_video_in, dbg_use_vlm, dbg_moves, llm_provider, llm_model,
+                llm_asset_model, llm_base_url, llm_key},
+        outputs=[dbg_out, dbg_log])
 
     # ---- anteprima ritaglio ----
     _crop_inputs = [state, crop_which, aspect, crop_zoom, crop_x, crop_y]

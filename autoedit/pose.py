@@ -319,6 +319,212 @@ def annotate(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
     return Path(out_path)
 
 
+def _bbox_visible(lm: np.ndarray, vis_min: float = 0.4):
+    m = lm[:, 2] >= vis_min
+    if m.sum() < 4:
+        return None
+    xs, ys = lm[m, 0], lm[m, 1]
+    return float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
+
+
+def _torso_bbox(lm: np.ndarray):
+    """Riquadro attorno al busto (spalle + fianchi), per il fuoco di
+    default quando non c'e' una presa specifica."""
+    names = ["l_shoulder", "r_shoulder", "l_hip", "r_hip"]
+    pts = [lm[IDX[n]] for n in names if lm[IDX[n], 2] >= 0.3]
+    if len(pts) < 3:
+        return _bbox_visible(lm)
+    a = np.array(pts)
+    cx, cy = float(a[:, 0].mean()), float(a[:, 1].mean())
+    r = min(0.24, max(0.13, float(np.ptp(a[:, 0])) * 0.7, float(np.ptp(a[:, 1])) * 0.6))
+    return (cx - r, cy - r, cx + r, cy + r)
+
+
+def debug_video(path: Path | str, out_path: Path | str, frames: list[PoseFrame],
+                holds: list[Hold], cts: list[Contact], px_pole: Optional[float],
+                labels: Optional[dict] = None, transcode: bool = True) -> Path:
+    """Video DEBUG: guardi attraverso un mirino da reflex e vedi DOVE
+    l'IA sta mettendo il fuoco (staffe AF che scattano sulla presa /
+    sul soggetto), la griglia dei punti AF, il palo, lo scheletro, e un
+    HUD con parte in focus / nome mossa / FOCUS LOCK sui fermi.
+
+    `labels` = {indice_hold: {"move": str, "grip": str}} da vision.py.
+    """
+    import cv2  # noqa: PLC0415
+
+    cap = cv2.VideoCapture(str(path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    dur = total / fps if total else (frames[-1].t if frames else 1.0)
+    by_t = sorted(frames, key=lambda f: f.t)
+    labels = labels or {}
+
+    raw = Path(out_path).with_suffix(".raw.mp4") if transcode else Path(out_path)
+    vw = cv2.VideoWriter(str(raw), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+
+    GREEN, AMBER, DIM = (90, 255, 120), (60, 200, 255), (120, 150, 120)
+    FT = cv2.FONT_HERSHEY_DUPLEX
+    m = int(min(w, h) * 0.045)                       # margine mirino
+    af_cols, af_rows = 7, 5
+    # box di fuoco "smussato": segue con inerzia il target
+    fx = [w * 0.5, h * 0.5, w * 0.28, h * 0.28]      # cx, cy, half-w, half-h
+
+    def bracket(img, cx, cy, hw, hh, col, thick, ln):
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                x, y = int(cx + sx * hw), int(cy + sy * hh)
+                cv2.line(img, (x, y), (int(x - sx * ln), y), col, thick)
+                cv2.line(img, (x, y), (x, int(y - sy * ln)), col, thick)
+
+    i = 0
+    while True:
+        ok, bgr = cap.read()
+        if not ok:
+            break
+        t = i / fps
+        pf = min(by_t, key=lambda f: abs(f.t - t)) if by_t else None
+        hold_now = next((k for k, hd in enumerate(holds) if hd.t0 <= t <= hd.t1), None)
+        blink = (i // max(1, int(fps * 0.35))) % 2 == 0
+
+        # --- mirino: bordo scuro + griglia dei terzi + reticolo centrale ---
+        ov = bgr.copy()
+        cv2.rectangle(ov, (0, 0), (w, m), (0, 0, 0), -1)
+        cv2.rectangle(ov, (0, h - m), (w, h), (0, 0, 0), -1)
+        cv2.rectangle(ov, (0, 0), (m, h), (0, 0, 0), -1)
+        cv2.rectangle(ov, (w - m, 0), (w, h), (0, 0, 0), -1)
+        cv2.addWeighted(ov, 0.45, bgr, 0.55, 0, bgr)
+        for gx in (w // 3, 2 * w // 3):
+            cv2.line(bgr, (gx, m), (gx, h - m), (255, 255, 255), 1, cv2.LINE_AA)
+        for gy in (m + (h - 2 * m) // 3, m + 2 * (h - 2 * m) // 3):
+            cv2.line(bgr, (m, gy), (w - m, gy), (255, 255, 255), 1, cv2.LINE_AA)
+        for sx in (m, w - m):
+            for sy in (m, h - m):
+                dx = 26 if sx == m else -26
+                dy = 26 if sy == m else -26
+                cv2.line(bgr, (sx, sy), (sx + dx, sy), (255, 255, 255), 2)
+                cv2.line(bgr, (sx, sy), (sx, sy + dy), (255, 255, 255), 2)
+        cv2.drawMarker(bgr, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 22, 1)
+
+        # --- target del fuoco: bbox del fermo, o della presa, o del corpo ---
+        tgt = None
+        if hold_now is not None:
+            tgt = holds[hold_now].bbox
+        elif cts:
+            c = next((c for c in cts if c.t0 <= t <= c.t1), None)
+            if c:
+                tgt = (c.px[0] - 0.13, c.px[1] - 0.13, c.px[0] + 0.13, c.px[1] + 0.13)
+        if tgt is None and pf is not None and pf.lm is not None:
+            tgt = _torso_bbox(pf.lm)
+        if tgt is not None:
+            tcx = (tgt[0] + tgt[2]) / 2 * w
+            tcy = (tgt[1] + tgt[3]) / 2 * h
+            thw = max(40, (tgt[2] - tgt[0]) / 2 * w)
+            thh = max(40, (tgt[3] - tgt[1]) / 2 * h)
+            for j, v in enumerate((tcx, tcy, thw, thh)):        # inseguimento morbido
+                fx[j] += (v - fx[j]) * 0.35
+
+        # --- griglia punti AF (verde quelli sul soggetto / target) ---
+        for r in range(af_rows):
+            for c in range(af_cols):
+                px = int(m + (w - 2 * m) * (c + 0.5) / af_cols)
+                py = int(m + (h - 2 * m) * (r + 0.5) / af_rows)
+                inside = (fx[0] - fx[2] < px < fx[0] + fx[2] and
+                          fx[1] - fx[3] < py < fx[1] + fx[3])
+                col = GREEN if (inside and (hold_now is not None or blink)) else (150, 150, 150)
+                s = 7 if inside else 4
+                cv2.rectangle(bgr, (px - s, py - s), (px + s, py + s), col,
+                              2 if inside else 1)
+
+        # --- scheletro tenue + contatti ---
+        if pf is not None and pf.lm is not None:
+            L = pf.lm
+            for a, b in _SKELETON:
+                pa, pb = L[IDX[a]], L[IDX[b]]
+                if pa[2] > 0.3 and pb[2] > 0.3:
+                    cv2.line(bgr, (int(pa[0] * w), int(pa[1] * h)),
+                             (int(pb[0] * w), int(pb[1] * h)), DIM, 1, cv2.LINE_AA)
+            for part, names in GRIP_PARTS.items():
+                xy = _part_xy(L, names, 0.3)
+                if xy:
+                    on = px_pole is not None and abs(xy[0] - px_pole) < 0.09
+                    cv2.circle(bgr, (int(xy[0] * w), int(xy[1] * h)), 8,
+                               GREEN if on else AMBER, -1 if on else 2)
+
+        # --- palo ---
+        if px_pole is not None:
+            xp = int(px_pole * w)
+            cv2.line(bgr, (xp, m), (xp, h - m), (0, 170, 255), 1, cv2.LINE_AA)
+            cv2.putText(bgr, "POLE", (xp + 8, h // 2), FT, 0.5, (0, 170, 255), 1)
+
+        # --- box di fuoco (staffe che scattano) ---
+        locked = hold_now is not None
+        col = GREEN if locked else AMBER
+        bracket(bgr, fx[0], fx[1], fx[2], fx[3], col, 3 if locked else 2,
+                int(min(fx[2], fx[3]) * 0.4))
+        if locked and blink:
+            cv2.rectangle(bgr, (int(fx[0] - fx[2]), int(fx[1] - fx[3])),
+                          (int(fx[0] + fx[2]), int(fx[1] + fx[3])), GREEN, 1)
+
+        # --- HUD ---
+        tc = f"{int(t // 60):02d}:{int(t % 60):02d}:{int((t * fps) % fps):02d}"
+        if blink:
+            cv2.circle(bgr, (m + 14, m + 16), 7, (60, 60, 255), -1)
+        cv2.putText(bgr, f"REC {tc}", (m + 30, m + 22), FT, 0.6, (255, 255, 255), 1)
+        cv2.putText(bgr, "AF-C" if not locked else "AF LOCK", (w - m - 130, m + 22),
+                    FT, 0.6, col, 2)
+        lab = labels.get(hold_now, {}) if hold_now is not None else {}
+        part_txt = PART_IT.get(holds[hold_now].focus_part, "?") if hold_now is not None else "--"
+        grip_txt = lab.get("grip") or part_txt
+        move_txt = lab.get("move") or ("POSE" if pf and pf.lm is not None else "no soggetto")
+        cv2.putText(bgr, f"FOCUS: {grip_txt}", (m + 10, h - m - 14), FT, 0.6, col, 2)
+        cv2.putText(bgr, move_txt.upper(), (w // 2 - 70, h - m - 14), FT, 0.55, (255, 255, 255), 1)
+        if locked and blink:
+            cv2.putText(bgr, "[ FOCUS LOCK ]", (w // 2 - 95, m + 46), FT, 0.6, GREEN, 2)
+
+        # --- timeline dei fermi ---
+        y = h - m + 8
+        cv2.line(bgr, (m, y), (w - m, y), (90, 90, 90), 2)
+        for hd in holds:
+            x0 = int(m + hd.t0 / dur * (w - 2 * m))
+            x1 = int(m + hd.t1 / dur * (w - 2 * m))
+            cv2.line(bgr, (x0, y), (x1, y), GREEN, 6)
+        cv2.drawMarker(bgr, (int(m + t / dur * (w - 2 * m)), y), (255, 255, 255),
+                       cv2.MARKER_TRIANGLE_DOWN, 12, 2)
+
+        vw.write(bgr)
+        i += 1
+    cap.release()
+    vw.release()
+
+    if transcode:
+        import shutil
+        import subprocess
+        if shutil.which("ffmpeg"):
+            subprocess.run(["ffmpeg", "-y", "-i", str(raw), "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p", "-preset", "veryfast",
+                            str(out_path), "-loglevel", "error"], check=False)
+            raw.unlink(missing_ok=True)
+        else:
+            raw.replace(out_path)
+    return Path(out_path)
+
+
+def save_frame(path: Path | str, t: float, out_png: Path | str) -> Path:
+    """Estrae il fotogramma al secondo `t` come PNG."""
+    import cv2  # noqa: PLC0415
+    cap = cv2.VideoCapture(str(path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(round(t * fps))))
+    ok, bgr = cap.read()
+    cap.release()
+    if not ok:
+        raise RuntimeError(f"Nessun fotogramma a t={t}s in {path}")
+    cv2.imwrite(str(out_png), bgr)
+    return Path(out_png)
+
+
 def capabilities() -> dict:
     return {"grip_parts": list(GRIP_PARTS), "model": _POSE_TASK.name,
             "model_present": _POSE_TASK.is_file()}

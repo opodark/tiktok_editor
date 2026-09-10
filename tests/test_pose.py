@@ -3,7 +3,8 @@ import numpy as np
 import pytest
 
 from autoedit.pose import (
-    GRIP_PARTS, IDX, Contact, PoseFrame, _motion, _part_xy, capabilities, contacts, detect_holds,
+    GRIP_PARTS, IDX, Contact, PoseFrame, _bbox_visible, _motion, _part_xy, _torso_bbox,
+    capabilities, contacts, detect_holds,
 )
 
 
@@ -61,6 +62,22 @@ def test_hold_focus_is_most_recent_contact():
            Contact("right_foot", 0.7, 2.0, (0.5, 0.9))]
     holds = detect_holds(frames, cts, still=0.05, min_hold=0.3)
     assert holds and holds[0].focus_part == "right_foot"    # iniziato dopo
+
+
+def test_torso_bbox_is_centered_and_clamped():
+    lm = _lm(l_shoulder=(0.35, 0.30), r_shoulder=(0.65, 0.30),
+             l_hip=(0.40, 0.60), r_hip=(0.60, 0.60))
+    x0, y0, x1, y1 = _torso_bbox(lm)
+    assert x0 < 0.5 < x1 and y0 < 0.45 < y1
+    assert (x1 - x0) / 2 <= 0.24 + 1e-6            # raggio clampato
+    assert _torso_bbox(_lm()) is None             # niente busto visibile -> None come _bbox_visible
+
+
+def test_bbox_visible_none_when_too_few_points():
+    assert _bbox_visible(_lm(l_wrist=(0.5, 0.5))) is None
+    b = _bbox_visible(_lm(l_wrist=(0.2, 0.3), r_wrist=(0.8, 0.3),
+                          l_ankle=(0.3, 0.9), r_ankle=(0.7, 0.9)))
+    assert b == pytest.approx((0.2, 0.3, 0.8, 0.9), abs=1e-5)
 
 
 def test_capabilities():
